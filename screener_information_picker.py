@@ -10,27 +10,37 @@ Main task of this module will be on call with parameters,
 """
 
 from sec_api import QueryApi# limited number of requests - unsustainable :(
-
-#from sec_edgar_api import EdgarClient
+from sec_api import ExtractorApi
+from sec_api import XbrlApi
 
 import const
 
-queryApi = QueryApi(api_key=const.EDGAR_API_KEY)
-
-query = {
-  "query": "ticker:MSFT AND filedAt:[2020-01-01 TO 2024-12-31] AND formType:\"10-Q\"",
-  "from": "0",
-  "size": "10",
-  "sort": [{ "filedAt": { "order": "desc" } }]
-}
-filings = queryApi.get_filings(query)
-
-results = find_info_in_doc(document=filings, find=["revenue", "gross", "margin", "financial", "msft-20240331", "17,080", "778", "cik", "htm"])
-cik = int(results["cik"][0])
-
-len(results["htm"])
-
-
+def __experimenting():
+    queryApi = QueryApi(api_key=const.EDGAR_API_KEY)
+    extractorApi = ExtractorApi(const.EDGAR_API_KEY)
+    
+    query = {
+      "query": "ticker:MSFT AND filedAt:[2020-01-01 TO 2024-12-31] AND formType:\"10-Q\"",
+      "from": "0",
+      "size": "10",
+      "sort": [{ "filedAt": { "order": "desc" } }]
+    }
+    filings = queryApi.get_filings(query)
+    
+    results = find_info_in_doc(document=filings, find=["revenue", "gross", "margin", "financial", "msft-20240331", "17,080", "778", "cik", "htm"])
+    cik = int(results["cik"][0])
+    
+    fil_url = results["msft-20240331"][-1]
+    item_1 = extractorApi.get_section(fil_url, "part1item1", "html")
+    
+    xbrl_json = XbrlApi.xbrl_to_json(htm_url = fil_url)
+    
+    income_statement    = xbrl_json["StatementsOfIncome"]
+    balance_sheet       = xbrl_json["BalanceSheets"]
+    cash_flow_statement = xbrl_json["StatementsOfCashFlows"]
+    full_report = [income_statement, balance_sheet, cash_flow_statement]
+    results = find_info_in_doc(document=full_report, find=["Revenue"])
+    
 
 
 def find_info_in_doc(document, find):
