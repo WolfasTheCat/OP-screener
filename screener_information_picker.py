@@ -9,128 +9,72 @@ Main task of this module will be on call with parameters,
  out of it's corpus
 """
 
-from sec_api import QueryApi# limited number of requests - unsustainable :(
-from sec_api import ExtractorApi
-from sec_api import XbrlApi
-
-import const
-
-def __experimenting():
-    queryApi = QueryApi(api_key=const.EDGAR_API_KEY)
-    extractorApi = ExtractorApi(const.EDGAR_API_KEY)
-    
-    query = {
-      "query": "ticker:MSFT AND filedAt:[2020-01-01 TO 2024-12-31] AND formType:\"10-Q\"",
-      "from": "0",
-      "size": "10",
-      "sort": [{ "filedAt": { "order": "desc" } }]
-    }
-    filings = queryApi.get_filings(query)
-    
-    results = find_info_in_doc(document=filings, find=["revenue", "gross", "margin", "financial", "msft-20240331", "17,080", "778", "cik", "htm"])
-    cik = int(results["cik"][0])
-    
-    fil_url = results["msft-20240331"][-1]
-    item_1 = extractorApi.get_section(fil_url, "part1item1", "html")
-    
-    xbrl_json = XbrlApi.xbrl_to_json(htm_url = fil_url)
-    
-    income_statement    = xbrl_json["StatementsOfIncome"]
-    balance_sheet       = xbrl_json["BalanceSheets"]
-    cash_flow_statement = xbrl_json["StatementsOfCashFlows"]
-    full_report = [income_statement, balance_sheet, cash_flow_statement]
-    results = find_info_in_doc(document=full_report, find=["Revenue"])
-    
-
-
 def find_info_in_doc(document, find):
     stack = [document]
+    path_stack = [[0]]
+    
     results = {}
     low_find = [f.lower() for f in find]
     while len(stack) > 0:
-        item = stack.pop()# !!! replacing the original variable
+        item = stack.pop()
+        item_path = path_stack.pop()
         if type(item) is dict:
-            for k in item:
-                low_k = k.lower()
-                if low_k in low_find:#                              if A in B:
-                    add_to_dict(results, key=k, item=item[k])#           Found
-                    #results.append({k:item[k]})
-                else:
-                    skip_this_item = False
-                    for f in low_find:
-                        if f in low_k:#                             if B in A:
-                            add_to_dict(results, key=k, item=item[k])#   Found
-                            skip_this_item = True
-                            #results.append({k:item[k]})
-                    if not skip_this_item:
-                        stack.append(item[k])
+            search_level_of_dict(item, low_find, results, stack, path_stack, item_path)
         elif type(item) is list:
             for i in range(len(item)):
                 stack.append(item[i])
+                
+                new_item_path = extend_item_path(item_path, i)
+                path_stack.append(new_item_path)
         else:
             if type(item) is str:
                 item_lc = item.lower()
                 for f in low_find:
                     if f in item_lc:
-                        add_to_dict(results, key=f, item=item)#         Found
+                        new_item_path = extend_item_path(item_path, f)
+                        add_to_dict(results, key=f, item=item, item_path=item_path)#         Found
                         #results.append({f:item})
             #else:# continue
             #    #print(type(item))
     return results
 
-def add_to_dict(dic, key, item):
+def add_to_dict(dic, key, item, item_path):
     if key not in dic:
-        dic[key] = [item]
+        dic[key] = {"item":[item], "path":[item_path]}
     else:
-        if item not in dic[key]:
-            dic[key].append(item)
+        if item not in dic[key]["item"]:
+            dic[key]["item"].append(item)
+            dic[key]["path"].append(item_path)
+
+def search_level_of_dict(item, low_find, results, stack, path_stack, item_path):
+    for k in item:
+        low_k = k.lower()
+        if low_k in low_find:#                              if A in B:
+            add_to_dict(results, key=k, item=item[k], item_path=item_path)#           Found
+            #results.append({k:item[k]})
+        elif item[k] in low_find:
+            add_to_dict(results, key=item[k], item=item, item_path=item_path)
+        else:
+            skip_this_item = False
+            for f in low_find:
+                if f in low_k:#                             if B in A:
+                    add_to_dict(results, key=k, item=item[k], item_path=item_path)#   Found
+                    skip_this_item = True
+                    #results.append({k:item[k]})
+                elif isinstance(item[k], (str, dict, list)) and f in item[k]:
+                    add_to_dict(results, key=f, item=item, item_path=item_path)
+                    skip_this_item = True
+            if not skip_this_item:
+                stack.append(item[k])
+                new_item_path = extend_item_path(item_path, k)
+                path_stack.append(new_item_path)
 
 
+def extend_item_path(parent_path, node_sub_path):
+    if parent_path is not None and parent_path[0] is not None:
+        new_item_path = parent_path.copy()
+        new_item_path.append(node_sub_path)
+    else:
+        new_item_path = [node_sub_path]
+    return new_item_path
 
-# print(filings)
-
-    
-"""  
-import plotly.subplots as psub
-def via_sub_plots():# in this form it can plot multiple graphs into one - if needed ;-)
-    viz_objects = {"visualization":{},"direct html":[]}
-    edgar_reports = load_edgar(path="../edgar-crawler-main/datasets/EXTRACTED_FILINGS/")
-    for k in edgar_reports:
-        text_area = "<div>"+edgar_reports[k]["item_1"][:1000]+"</div>"
-        viz_objects["direct html"].append(text_area)
-    
-    downloaded_instrument = "^SPX"
-    data = yf.download(downloaded_instrument, start="2020-01-01", end="2021-01-01")
-    #viz_objects["visualization"].append(plx.bar(x=data.index, y=data["Close"]))
-    
-    
-    fig = psub.make_subplots()
-    
-    
-    candle_title = "SP500 index"# plgo.Figure( )
-    candle_graph = plgo.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"]) 
-    
-    
-    fig.add_trace(candle_graph)
-    
-    viz_objects["visualization"][candle_title] = fig
-    
-    # plgo.Figure(candle_graph).show()
-    
-    multiple_graphs_on_page(viz_objects)
- """
- 
-"""
-def experiments():
-    ######## PLOTLY  ########
-    fig = plx.bar(x=["a", "b", "c"], y=[1, 3, 2])
-    
-    ######## YAHOO  ########
-    # SP500 ^SPX nebo ^GSPC
-
-#def load_current_prices():
-    fig = plx.bar(x=["SPX500"], y=[data])
-    fig.write_html('first_figure.html', auto_open=True)
-    # seems like this way??
-    #print(data.head())
-"""
