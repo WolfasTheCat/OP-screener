@@ -83,6 +83,8 @@ frames_url          = "https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPaya
 frames_url_2        = "https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY2019Q1I.json"
 
 
+accession_number = "0001193125-24-118081"
+
 response = requests.get(submissions_history_url, headers={"User-Agent": "Mozilla/5.0"})
 
 json_response = response.json()# here I get the 10-Q
@@ -90,6 +92,8 @@ json_response = response.json()# here I get the 10-Q
 results = picky.find_info_in_doc(json_response, find=["CY"])
 
 
+def price_earning_ratio(share_price, earnings_per_share):
+    return share_price / earnings_per_share
 
 
 
