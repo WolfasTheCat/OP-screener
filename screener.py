@@ -56,9 +56,60 @@ def main():
     
     viz_objects["visualization"][price_title] = price_graph
     ita_title = "Indicators of Technical Analysis"
-    viz_objects["visualization"][ita_title] = x_shared_subplots(data, class_title=ita_title, graph_title=graph_title)
+    viz_objects["visualization"][ita_title] = hover_subplots(data, class_title=ita_title, graph_title=graph_title)
     multiple_graphs_on_page(viz_objects)
     
+def hover_subplots(data, class_title, graph_title):
+    layout = dict(
+        hoversubplots="axis",
+        title=class_title+" for "+graph_title,
+        hovermode="x",
+        grid=dict(rows=3, columns=1),
+        coloraxis=dict(colorscale='solar_r', showscale=False, colorbar_orientation="h")
+        
+    )
+    
+    plots = [
+        
+        plgo.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Candlestick", xaxis="x", yaxis="y"),
+        plgo.Line(x=data.index, y= data["Close"], name="Close", xaxis="x", yaxis="y")
+            ]
+    for sma_n in (10, 20, 30, 50):
+        close_SMA = indicators.SMA(data["Close"], sma_n)
+        plots.append(
+            plgo.Line(x=data.index[len(data["Close"])-len(close_SMA):], y= close_SMA, name="SMA("+str(sma_n)+")", xaxis="x", yaxis="y", visible=("legendonly" if sma_n!=20 else True)))
+    for ema_n in (10, 20, 30, 50):
+        close_EMA = indicators.EMA(data["Close"], ema_n)
+        plots.append(
+            plgo.Line(x=data.index[len(data["Close"])-len(close_EMA):], y= close_EMA, name="EMA("+str(ema_n)+")", xaxis="x", yaxis="y", visible="legendonly" if ema_n!=20 else True))
+    for rsi_n in (9, 14, 26):
+        close_RSI_n = indicators.RSI(data["Close"], rsi_n)
+        plots.append(
+            plgo.Line(x=data.index[len(data["Close"])-len(close_RSI_n):], y= close_RSI_n, name="RSI("+str(rsi_n)+")", xaxis="x", yaxis="y2", visible=("legendonly" if rsi_n!=14 else True)))
+    plots.append(
+        plgo.Bar(x=data.index, y=data["Volume"], name="Volume", xaxis="x", yaxis="y3", marker=dict(color=data["Volume"], coloraxis="coloraxis")))
+    
+    fig = plgo.Figure(data=plots, layout=layout)
+    fig.update_layout(title_text=class_title+" for "+graph_title,
+                      yaxis=dict(title="Price [USD]", overlaying="y", rangemode="tozero"),
+                      yaxis2=dict(title="RSI", overlaying="y2"),
+                      yaxis3=dict(title="Volume", overlaying="y3", rangemode="tozero"),
+                      xaxis=dict(overlaying="x", rangeslider_visible=False))
+    fig.update_legends(title_text=class_title)
+    fig.update_xaxes(# time buttons
+        rangeselector=dict(
+            buttons=list([
+                dict(count=1, label="1m", step="month", stepmode="backward"),
+                dict(count=6, label="6m", step="month", stepmode="backward"),
+                #dict(count=1, label="YTD", step="year", stepmode="todate"),
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(step="all")
+            ])
+        )#, rangeslider_visible=True, rangeslider_thickness=0.15# default 0.15, rangeslider_bordercolor="black"
+        )
+    
+    fig.update_yaxes(fixedrange=False)
+    return fig
     
 def x_shared_subplots(data, class_title, graph_title):
     fig = plsub.make_subplots(rows=3, cols=1,
@@ -82,22 +133,21 @@ def x_shared_subplots(data, class_title, graph_title):
     #, hovertemplate="%{y}%{_xother}"
 
     fig.update_xaxes(# time buttons
-    rangeselector=dict(
-        buttons=list([
-            dict(count=1, label="1m", step="month", stepmode="backward"),
-            dict(count=6, label="6m", step="month", stepmode="backward"),
-            #dict(count=1, label="YTD", step="year", stepmode="todate"),
-            dict(count=1, label="1y", step="year", stepmode="backward"),
-            dict(step="all")
-        ])
-    )
+        rangeselector=dict(
+            buttons=list([
+                dict(count=1, label="1m", step="month", stepmode="backward"),
+                dict(count=6, label="6m", step="month", stepmode="backward"),
+                #dict(count=1, label="YTD", step="year", stepmode="todate"),
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(step="all")
+            ])
+        )
     , row=1, col=1)
     
     fig.update_xaxes(# time range
         rangeslider_visible=True,
         
         rangeslider_thickness=0.15# default 0.15
-        , rangeslider_bordercolor="black"
         , row=3, col=1)
     return fig
 
