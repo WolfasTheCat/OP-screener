@@ -7,7 +7,7 @@ Created on Wed Mar 27 12:17:02 2024
 
 import yfinance as yf
 
-# import plotly.express as plx
+import plotly.express as plx
 import plotly.offline as plo
 
 import plotly.graph_objects as plgo
@@ -19,9 +19,10 @@ from datetime import datetime
 import indicators
 import const
 
+import pickle
+
 def main():
     viz_objects = {"visualization":{},"direct html":[]}
-    
     
     # As JSON:
     #edgar_reports = load_edgar(path="../edgar-crawler-main/datasets/EXTRACTED_FILINGS/")
@@ -37,7 +38,7 @@ def main():
     text_area = "<div>"+kys+"</div>"
     viz_objects["direct html"].append(text_area)
     """
-    data = yf.download("^SPX", start="2020-01-01", end=datetime.now().strftime("%Y-%m-%d"))
+    data = yf.download("^SPX", start="2018-01-01", end=datetime.now().strftime("%Y-%m-%d"))
     #viz_objects["visualization"].append(plx.bar(x=data.index, y=data["Close"]))
     
     graph_title = "S&P 500 Index"
@@ -57,6 +58,7 @@ def main():
     viz_objects["visualization"][price_title] = price_graph
     ita_title = "Indicators of Technical Analysis"
     viz_objects["visualization"][ita_title] = hover_subplots(data, class_title=ita_title, graph_title=graph_title)
+    viz_objects["visualization"]["Fundamental Analysis"] = PE_graph()
     multiple_graphs_on_page(viz_objects)
     
 def hover_subplots(data, class_title, graph_title):
@@ -72,7 +74,7 @@ def hover_subplots(data, class_title, graph_title):
     plots = [
         
         plgo.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name="Candlestick", xaxis="x", yaxis="y"),
-        plgo.Line(x=data.index, y= data["Close"], name="Close", xaxis="x", yaxis="y")
+        plgo.Line(x=data.index, y= data["Close"], name="Close", xaxis="x", yaxis="y", visible="legendonly")
             ]
     for sma_n in (10, 20, 30, 50):
         close_SMA = indicators.SMA(data["Close"], sma_n)
@@ -108,7 +110,7 @@ def hover_subplots(data, class_title, graph_title):
         )#, rangeslider_visible=True, rangeslider_thickness=0.15# default 0.15, rangeslider_bordercolor="black"
         )
     
-    fig.update_yaxes(fixedrange=False)
+    fig.update_yaxes(fixedrange=False)# for y and box zoom
     return fig
     
 def x_shared_subplots(data, class_title, graph_title):
@@ -191,6 +193,19 @@ def price_graphs(data, title):
     price_graph.update_yaxes(fixedrange=False)# fixing the y-range of the graph <3
     return price_graph
 
+def PE_graph(company_ticker="MSFT"):
+    with open(company_ticker+"D_PE"+".json", 'rb') as f:
+        PE_data = pickle.load(f)
+    #plx.Figure( )
+    #plx.Figure( )
+    fig = plsub.make_subplots()
+    for k in PE_data:
+         fig.add_trace(plgo.Scatter(x=PE_data[k]["date"], y= PE_data[k]["value"], name=k))
+    fig.update_layout(title_text="P/E Ratio for "+company_ticker)
+    fig.update_legends(title_text="Earnings Per Share Diluted [USD]")
+    #fig = plx.scatter(x=PE_data["date"], y= PE_data["value"])
+    return fig
+    
 
 
 def multiple_graphs_on_page(viz_objects, file=const.RESULTING_FILE):

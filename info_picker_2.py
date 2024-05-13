@@ -15,6 +15,10 @@ from sec_edgar_api import EdgarClient
 
 import screener_information_picker as picky
 
+import pickle
+
+import yfinance as yf
+
 def __experimenting():
     queryApi = QueryApi(api_key=const.EDGAR_API_KEY)
     xbrlApi = XbrlApi(api_key=const.EDGAR_API_KEY)
@@ -35,27 +39,42 @@ def __experimenting():
     
     fil_url = 'https://www.sec.gov/Archives/edgar/data/789019/000095017024048288/msft-20240331.htm'
     xbrl_json = xbrlApi.xbrl_to_json(htm_url = fil_url)
-    income_statement    = xbrl_json["StatementsOfIncome"]
-    balance_sheet       = xbrl_json["BalanceSheets"]
-    cash_flow_statement = xbrl_json["StatementsOfCashFlows"]
-    full_report = [income_statement, balance_sheet, cash_flow_statement]
-    results = picky.find_info_in_doc(document=full_report, find=["Revenue"])
-    company_revenues = {}
-    for k in results:
-        for i in range(len(results[k][0])):
-            res = results[k][0][i]
-            who = None
-            when = None
-            amount = None
-            if "value" in res and "segment" in res and "period" in res:
-                who = res["segment"]["value"]
-                amount = res["value"]
-                when = res["period"]
-                picky.add_to_dict(company_revenues, key=who, item={"period":when, "amount":amount}, item_path=[])
-    for k in company_revenues:
-        company_revenues[k]
+    company_ticker = "MSFT"
+    #with open(company_ticker+".json", 'wb') as f:
+    #    pickle.dump(xbrl_json, f)
+    
+    #income_statement    = xbrl_json["StatementsOfIncome"]"BalanceSheets","StatementsOfCashFlows"
+    
 
 
+def calculate_PE(company_ticker):
+    with open(company_ticker+".json", 'rb') as f:
+        xbrl_json = pickle.load(f)
+    earning_per_share = xbrl_json["StatementsOfIncome"]["EarningsPerShareDiluted"]
+    earnings_data = {"date":[],
+                     "value":[]}
+    
+    earnings_data_separated = {}
+    for earning in earning_per_share:
+        period_start = earning["period"]["startDate"]
+        period_end = earning["period"]["endDate"]
+        earning_per_period = float(earning["value"])
+        earnings_data_separated[earning["value"]] = {"date":[], "value":[]}
+        
+        data_period = yf.download(company_ticker, start=period_start, end=period_end)
+        for date in data_period.index:
+            close_price = data_period["Close"][date]
+            pe = price_earning_ratio(share_price=close_price, earnings_per_share=earning_per_period)
+            earnings_data["date"].append(date)
+            earnings_data["value"].append(pe)
+            
+            earnings_data_separated[earning["value"]]["date"].append(date)
+            earnings_data_separated[earning["value"]]["value"].append(pe)
+    with open(company_ticker+"_PE"+".json", 'wb') as f:
+        pickle.dump(earnings_data, f)
+    with open(company_ticker+"D_PE"+".json", 'wb') as f:
+        pickle.dump(earnings_data_separated, f)
+    
 
 def wrapper_sec_edgar_api_experiment():
     edgar = EdgarClient(user_agent="<Sample Company Name> <Admin Contact>@<Sample Company Domain>")
