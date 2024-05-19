@@ -83,32 +83,32 @@ def wrapper_sec_edgar_api_experiment():
     submission = edgar.get_submissions(cik=cik)
     edgar.get_frames(taxonomy="us-gaap", tag="AccountsPayableCurrent", unit="USD", year="2019", quarter=1)
     
-# https://data.sec.gov/submissions/CIK##########.json# Central Index Key 
-
-# time to crawl the shit out of it
-#fil_url = 'https://www.sec.gov/Archives/edgar/data/789019/000095017024048288/msft-20240331.htm'
-
-import requests
-cik = str(789019)
-cik_10digs = ((10-len(cik))*"0")+cik
-submissions_history_url = "https://data.sec.gov/submissions/CIK"+cik_10digs+".json"
-companyconcept_url  = "https://data.sec.gov/api/xbrl/companyconcept/CIK"+cik_10digs+"/us-gaap/AccountsPayableCurrent.json"
-companyfacts_url    = "https://data.sec.gov/api/xbrl/companyfacts/CIK"+cik_10digs+".json"
-
-Year = 2019
-Quartal = 1
-CY = "msft-20230331"
-frames_url          = "https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY"+CY+".json"
-frames_url_2        = "https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY2019Q1I.json"
-
-
-accession_number = "0001193125-24-118081"
-
-response = requests.get(submissions_history_url, headers={"User-Agent": "Mozilla/5.0"})
-
-json_response = response.json()# here I get the 10-Q
-
-results = picky.find_info_in_doc(json_response, find=["CY"])
+    # https://data.sec.gov/submissions/CIK##########.json# Central Index Key 
+    
+    # time to crawl the shit out of it
+    #fil_url = 'https://www.sec.gov/Archives/edgar/data/789019/000095017024048288/msft-20240331.htm'
+    
+    import requests
+    cik = str(789019)
+    cik_10digs = ((10-len(cik))*"0")+cik
+    submissions_history_url = "https://data.sec.gov/submissions/CIK"+cik_10digs+".json"
+    companyconcept_url  = "https://data.sec.gov/api/xbrl/companyconcept/CIK"+cik_10digs+"/us-gaap/AccountsPayableCurrent.json"
+    companyfacts_url    = "https://data.sec.gov/api/xbrl/companyfacts/CIK"+cik_10digs+".json"
+    
+    Year = 2019
+    Quartal = 1
+    CY = "msft-20230331"
+    frames_url          = "https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY"+CY+".json"
+    frames_url_2        = "https://data.sec.gov/api/xbrl/frames/us-gaap/AccountsPayableCurrent/USD/CY2019Q1I.json"
+    
+    
+    accession_number = "0001193125-24-118081"
+    
+    response = requests.get(submissions_history_url, headers={"User-Agent": "Mozilla/5.0"})
+    
+    json_response = response.json()# here I get the 10-Q
+    
+    results = picky.find_info_in_doc(json_response, find=["CY"])
 
 
 def price_earning_ratio(share_price, earnings_per_share):

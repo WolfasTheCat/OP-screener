@@ -7,50 +7,42 @@ Created on Wed Mar 27 12:17:02 2024
 
 import yfinance as yf
 
-import plotly.express as plx
-import plotly.offline as plo
 
 import plotly.graph_objects as plgo
-import plotly.subplots as plsub
 
 from datetime import datetime
 
 import indicators
 import const
 
-import pickle
+import plotly.io as pio
+
+
+
+pio.kaleido.scope.default_format = "svg"
+#import plotly.io as pio
+#pio.kaleido.scope.mathjax = None
 
 def main():
-    viz_objects = {"visualization":{},"direct html":[]}
-    
-    # As JSON:
-    #edgar_reports = load_edgar(path="../edgar-crawler-main/datasets/EXTRACTED_FILINGS/")
-    #for k in edgar_reports:
-    #    text_area = "<div>"+edgar_reports[k]["item_6"][:300]+"</div>"
-    #    viz_objects["direct html"].append(text_area)
-    
+    viz_objects = {"visualization":{},"direct html":{}}
     data = yf.download("^SPX", start="2018-01-01", end=datetime.now().strftime("%Y-%m-%d"))
-    #viz_objects["visualization"].append(plx.bar(x=data.index, y=data["Close"]))
-    
     graph_title = "S&P 500 Index"
-    #, "yaxis":"Price [USD]", "xaxis":"Time"
-    
-    
-    #original#candle_graph = plgo.Figure( plgo.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"]), layout=graph_layout )
-    
 
-    price_title = "Price Developement"
-    price_graph = price_graphs(data, title=price_title+" of "+graph_title)
+    # price_title = "Price Developement"
+    # price_graph = price_graphs(data, title=price_title+" of "+graph_title)
+    
+    ita_title = "Technical Analysis"
+    hov_fig = hover_subplots(data, class_title=ita_title, graph_title=graph_title)
+    viz_objects["visualization"][ita_title] = hov_fig
     
     
-    #histogram_sub   = plgo.Histogram(   x=data.index, y=data["Volume"], name="Histogram", visible="legendonly")
+    # viz_objects["visualization"][price_title] = plo.plot(price_graph, include_plotlyjs=False,output_type="div")
+    
+    # viz_objects["visualization"]["Fundamental Analysis"] = plo.plot(PE_graph(), include_plotlyjs=False,output_type="div")
     
     
-    viz_objects["visualization"][price_title] = price_graph
-    ita_title = "Indicators of Technical Analysis"
-    viz_objects["visualization"][ita_title] = hover_subplots(data, class_title=ita_title, graph_title=graph_title)
-    viz_objects["visualization"]["Fundamental Analysis"] = PE_graph()
-    multiple_graphs_on_page(viz_objects)
+    multiple_graphs_on_page(viz_objects, source="Yahoo Finance")
+    
     
 def hover_subplots(data, class_title, graph_title):
     layout = dict(
@@ -79,7 +71,7 @@ def hover_subplots(data, class_title, graph_title):
     for rsi_n in (9, 14, 26):
         close_RSI_n = indicators.RSI(data["Close"], rsi_n)
         plots.append(
-            plgo.Line(x=data.index[len(data["Close"])-len(close_RSI_n):], y= close_RSI_n, name="RSI("+str(rsi_n)+")", xaxis="x", yaxis="y2", visible=("legendonly" if rsi_n!=14 else True)))
+            plgo.Line(x=data.index[len(data["Close"])-len(close_RSI_n):], y= close_RSI_n, name="RSI("+str(rsi_n)+")", xaxis="x", yaxis="y2", visible=("legendonly" if (rsi_n==9) else True)))
     num_plots_2nd = len(plots) - num_plots_1st
     plots.append(
         plgo.Bar(x=data.index, y=data["Volume"], name="Volume", xaxis="x", yaxis="y3", marker=dict(color=data["Volume"], coloraxis="coloraxis")))
@@ -116,8 +108,31 @@ def hover_subplots(data, class_title, graph_title):
         fig['data'][num_plots_1st+i]['line']['color']=clrs[i]
     
     fig.update_yaxes(fixedrange=False)# for y and box zoom
-    return fig
     
+    
+    config = {
+        'toImageButtonOptions': {
+            'format': 'svg',  # Set the default format to SVG
+            'filename': 'custom_image',  # Default filename
+            'height': 600,  # Default height
+            'width': 800,  # Default width
+            'scale': 1  # Default scale
+        }
+    }
+    
+    # Save the plot to an HTML file with the custom configuration
+    html_str = pio.to_html(fig, full_html=False, include_plotlyjs='cdn', config=config)
+    # pio.write_html(fig, file='plot.html', config=config)#         works just fine <3
+    
+    return html_str
+
+"""
+
+import pickle
+import plotly.subplots as plsub
+import plotly.express as plx
+import plotly.offline as plo
+
 def price_graphs(data, title):
     #price_subs = moving_averages_subgraphs(data)
     
@@ -142,6 +157,9 @@ def PE_graph(company_ticker="MSFT"):
     return fig
 
 """
+
+"""
+
 def candlesticks_positive_negative(data):
     data['change'] = data['Close'] - data['Open']
     data_up = data[data['change']>0]
@@ -160,7 +178,7 @@ fig.data[2].increasing.line.color = 'rgba(0,0,0,0)'
 fig.data[2].decreasing.fillcolor = 'rgba(127,0,0,255)'
 fig.data[2].decreasing.line.color = 'rgba(255,0,0,255)'
 """
-def multiple_graphs_on_page(viz_objects, file=const.RESULTING_FILE):
+def multiple_graphs_on_page(viz_objects, file=const.RESULTING_FILE, source="Yahoo Finance"):
     with open(file,"w",encoding="utf8") as fig:# <3 \u2665
         fig.write("<html> <head> <title>Screener</title></head> ")
         with open("./style.css", "r") as f:
@@ -168,7 +186,6 @@ def multiple_graphs_on_page(viz_objects, file=const.RESULTING_FILE):
             fig.writelines(css)
                   
         fig.write("<body>\n")
-        include_js = True
         
         graphs = viz_objects["visualization"]
         fig.write(""" <div class="tab"> """)
@@ -183,15 +200,14 @@ def multiple_graphs_on_page(viz_objects, file=const.RESULTING_FILE):
         for k in graphs:
             fig.write("""<div id=' """+k+""" ' class="tabcontent">""")
             
-            fig.write(plo.plot(graphs[k], include_plotlyjs=include_js,output_type="div"))
+            fig.write(graphs[k])
             
             fig.write("</div>")
-            include_js = False
-        #fig.write("</div>")
-        for html_obj in viz_objects["direct html"]:
-            fig.write(html_obj)
+        for k in viz_objects["direct html"]:
+            fig.write(viz_objects["direct html"][k])
         
-        fig.write("<div><small>"+datetime.now().strftime("%d. %m. %Y %H:%M:%S")+"</small></div>")
+        fig.write("<div>Volume supportive color-scale: dark color indicates high values, light color indicates low values.</div>")
+        fig.write("<div><small>"+datetime.now().strftime("%d. %m. %Y %H:%M:%S")+"</small> Source: "+source+"</div>")
         
         with open("./script.js", "r") as f:
             js = f.readlines()
