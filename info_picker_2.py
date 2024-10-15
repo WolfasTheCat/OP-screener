@@ -4,11 +4,18 @@ Created on Sat Apr 27 14:53:53 2024
 
 @author: chodo
 """
+import io
+import zipfile
+
+import requests
+from lxml.parser import result
 # This script uses various APIs (SEC, Yahoo Finance) to fetch financial filings and calculate P/E ratio (Price-Earnings Ratio).
 # It includes functions to experiment with SEC EDGAR API data and calculate financial ratios.
 
 from sec_api import QueryApi  # API for querying SEC filings (limited requests)
 from sec_api import XbrlApi  # API for parsing XBRL data from SEC filings
+from urllib3 import request
+
 import const  # Custom constants file, likely containing the API key
 
 # Import other required modules
@@ -16,6 +23,26 @@ from sec_edgar_api import EdgarClient  # Edgar API client for SEC filings
 import screener_information_picker as picky  # Custom module to extract specific information from documents
 import pickle  # Module for serializing and deserializing Python objects (used for storing data)
 import yfinance as yf  # Yahoo Finance API to fetch financial data
+
+# Sec Api
+def __edgar_API(years, quarter):
+    link = ""
+
+    get_overview_file(link,)
+
+def get_overview_file(link, years, quarter):
+    result = []
+
+    for current_year in years:
+        response = requests.get(link)
+        if response.status_code == 200:
+            z_file = zipfile.ZipFile(io.BytesIO(response.content))
+            print("Zip file downloaded")
+            z_file.extractall(f"xbrl_{current_year}_Q{quarter}")
+            result.append(z_file)
+        else:
+            print("Not able to download zip file")
+            return None
 
 # A function to experiment with SEC APIs
 def __experimenting():
