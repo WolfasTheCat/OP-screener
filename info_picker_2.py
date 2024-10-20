@@ -5,30 +5,50 @@ Created on Sat Apr 27 14:53:53 2024
 @author: chodo
 """
 import io
+import pickle  # Module for serializing and deserializing Python objects (used for storing data)
 import zipfile
+from tkinter.font import names
 
 import requests
-from lxml.parser import result
+import yfinance as yf  # Yahoo Finance API to fetch financial data
+from sec_api import QueryApi  # API for querying SEC filings (limited requests)
+from sec_api import XbrlApi  # API for parsing XBRL data from SEC filings
+# Import other required modules
+from sec_edgar_api import EdgarClient  # Edgar API client for SEC filings
+
+import const  # Custom constants file, likely containing the API key
+import screener_information_picker as picky  # Custom module to extract specific information from documents
+
+
 # This script uses various APIs (SEC, Yahoo Finance) to fetch financial filings and calculate P/E ratio (Price-Earnings Ratio).
 # It includes functions to experiment with SEC EDGAR API data and calculate financial ratios.
 
-from sec_api import QueryApi  # API for querying SEC filings (limited requests)
-from sec_api import XbrlApi  # API for parsing XBRL data from SEC filings
-from urllib3 import request
 
-import const  # Custom constants file, likely containing the API key
-
-# Import other required modules
-from sec_edgar_api import EdgarClient  # Edgar API client for SEC filings
-import screener_information_picker as picky  # Custom module to extract specific information from documents
-import pickle  # Module for serializing and deserializing Python objects (used for storing data)
-import yfinance as yf  # Yahoo Finance API to fetch financial data
 
 # Sec Api
 def __edgar_API(years, quarter):
     link = ""
 
     get_overview_file(link,)
+
+def get_all_current_companies():
+
+    # URL JSON
+    url = "https://www.sec.gov/files/company_tickers.json"
+
+    headers = {
+        'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
+    }
+
+    response = requests.get(url,headers=headers)
+    if response.status_code == 200:
+        data = response.json()
+
+        print("Successfully downloaded indexes of companies.")
+        return data
+    else:
+        print(f"Error while downloading: {response.status_code}")
+        return None
 
 def get_overview_file(link, years, quarter):
     result = []
@@ -43,6 +63,13 @@ def get_overview_file(link, years, quarter):
         else:
             print("Not able to download zip file")
             return None
+
+
+def __Sec_API():
+    pass
+
+
+
 
 # A function to experiment with SEC APIs
 def __experimenting():
@@ -158,5 +185,5 @@ def price_earning_ratio(share_price, earnings_per_share):
     return share_price / earnings_per_share  # P/E ratio is calculated as share price divided by earnings per share
 
 
-
-
+listCP = get_all_current_companies()
+pass
