@@ -7,10 +7,10 @@ Created on Sat Apr 27 14:53:53 2024
 import io
 import pickle  # Module for serializing and deserializing Python objects (used for storing data)
 import zipfile
-from tkinter.font import names
 
 import requests
 import yfinance as yf  # Yahoo Finance API to fetch financial data
+from numpy.distutils.conv_template import header
 from sec_api import QueryApi  # API for querying SEC filings (limited requests)
 from sec_api import XbrlApi  # API for parsing XBRL data from SEC filings
 # Import other required modules
@@ -19,26 +19,23 @@ from sec_edgar_api import EdgarClient  # Edgar API client for SEC filings
 import const  # Custom constants file, likely containing the API key
 import screener_information_picker as picky  # Custom module to extract specific information from documents
 
+headers = {
+        'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
+        }
 
 # This script uses various APIs (SEC, Yahoo Finance) to fetch financial filings and calculate P/E ratio (Price-Earnings Ratio).
 # It includes functions to experiment with SEC EDGAR API data and calculate financial ratios.
 
-
-
 # Sec Api
 def __edgar_API(years, quarter):
-    link = ""
+    link = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
 
-    get_overview_file(link,)
+    all_files = get_overview_file(link,years, quarter)
 
 def get_all_current_companies():
 
     # URL JSON
     url = "https://www.sec.gov/files/company_tickers.json"
-
-    headers = {
-        'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
-    }
 
     response = requests.get(url,headers=headers)
     if response.status_code == 200:
@@ -53,8 +50,10 @@ def get_all_current_companies():
 def get_overview_file(link, years, quarter):
     result = []
 
+
+
     for current_year in years:
-        response = requests.get(link)
+        response = requests.get(link,headers=headers)
         if response.status_code == 200:
             z_file = zipfile.ZipFile(io.BytesIO(response.content))
             print("Zip file downloaded")
@@ -63,6 +62,15 @@ def get_overview_file(link, years, quarter):
         else:
             print("Not able to download zip file")
             return None
+
+
+def get_company_concept(concept, company_ticker, quarter, list_of_companies):
+    url = "https://data.sec.gov/api/xbrl/companyconcept/CIK"
+
+    for company in list_of_companies:
+        if company["ticker"] == company_ticker:
+            company_id = company["cik_str"].astype(str).str.zfill(10)
+            response = requests.get(url + company_id+ f"us-gaap/{concept}.json", headers=header).json()
 
 
 def __Sec_API():
