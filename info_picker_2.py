@@ -7,10 +7,10 @@ Created on Sat Apr 27 14:53:53 2024
 import io
 import pickle  # Module for serializing and deserializing Python objects (used for storing data)
 import zipfile
+from typing import Dict
 
 import requests
 import yfinance as yf  # Yahoo Finance API to fetch financial data
-from numpy.distutils.conv_template import header
 from sec_api import QueryApi  # API for querying SEC filings (limited requests)
 from sec_api import XbrlApi  # API for parsing XBRL data from SEC filings
 # Import other required modules
@@ -19,13 +19,28 @@ from sec_edgar_api import EdgarClient  # Edgar API client for SEC filings
 import const  # Custom constants file, likely containing the API key
 import screener_information_picker as picky  # Custom module to extract specific information from documents
 
-headers = {
-        'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
+from edgar import *
+
+class Company:
+    def __init__(self, cik_str, ticker, title):
+        self.cik = cik_str
+        self.ticker = ticker
+        self.title = title
+
+
+class CompanyData:
+    def __init__(self, data: Dict):
+        self.companies: Dict[str, Company] = {
+            key: Company(**value) for key, value in data.items()
         }
 
-# This script uses various APIs (SEC, Yahoo Finance) to fetch financial filings and calculate P/E ratio (Price-Earnings Ratio).
-# It includes functions to experiment with SEC EDGAR API data and calculate financial ratios.
+def SecTools_API():
+    pass
 
+def SecTools_all_fillings_for_companies(list_all_companies,filling_type):
+    companies_data = CompanyData(list_all_companies)
+    pass
+    return 0
 # Sec Api
 def __edgar_API(years, quarter):
     link = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
@@ -33,7 +48,6 @@ def __edgar_API(years, quarter):
     all_files = get_overview_file(link,years, quarter)
 
 def get_all_current_companies():
-
     # URL JSON
     url = "https://www.sec.gov/files/company_tickers.json"
 
@@ -49,8 +63,6 @@ def get_all_current_companies():
 
 def get_overview_file(link, years, quarter):
     result = []
-
-
 
     for current_year in years:
         response = requests.get(link,headers=headers)
@@ -70,14 +82,13 @@ def get_company_concept(concept, company_ticker, quarter, list_of_companies):
     for company in list_of_companies:
         if company["ticker"] == company_ticker:
             company_id = company["cik_str"].astype(str).str.zfill(10)
-            response = requests.get(url + company_id+ f"us-gaap/{concept}.json", headers=header).json()
+            response = requests.get(url + company_id+ f"us-gaap/{concept}.json", headers=headers).json()
 
 
-def __Sec_API():
-    pass
-
-
-
+def expert():
+    all_companies = get_all_current_companies()
+    if all_companies:
+        SecTools_all_fillings_for_companies(all_companies, "10-Q")
 
 # A function to experiment with SEC APIs
 def __experimenting():
@@ -193,5 +204,10 @@ def price_earning_ratio(share_price, earnings_per_share):
     return share_price / earnings_per_share  # P/E ratio is calculated as share price divided by earnings per share
 
 
-listCP = get_all_current_companies()
-pass
+headers = {
+        'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
+        }
+
+set_identity("Alfred AlfredNem@gmail.com")
+
+expert()
