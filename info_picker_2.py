@@ -9,6 +9,7 @@ import pickle  # Module for serializing and deserializing Python objects (used f
 import zipfile
 from typing import Dict
 
+import edgar
 import requests
 import yfinance as yf  # Yahoo Finance API to fetch financial data
 from sec_api import QueryApi  # API for querying SEC filings (limited requests)
@@ -26,6 +27,7 @@ class Company:
         self.cik = cik_str
         self.ticker = ticker
         self.title = title
+        self.years = []
 
 
 class CompanyData:
@@ -36,6 +38,13 @@ class CompanyData:
 
 def SecTools_API():
     pass
+
+def SecTools_export_important_data(company):
+    company = Company(company["cik"])
+    fillings = company.get_filings(form="10-Q", is_xbrl= True)
+
+    for filing in fillings:
+        quartals = filing
 
 def SecTools_all_fillings_for_companies(list_all_companies,filling_type):
     companies_data = CompanyData(list_all_companies)
@@ -89,6 +98,27 @@ def expert():
     all_companies = get_all_current_companies()
     if all_companies:
         SecTools_all_fillings_for_companies(all_companies, "10-Q")
+
+
+
+
+
+
+
+# Probably will move to other file
+
+def P_E_ratio():
+    pass
+
+def P_B_ratio():
+    pass
+
+def P_CF_ratio():
+    pass
+
+
+
+
 
 # A function to experiment with SEC APIs
 def __experimenting():
