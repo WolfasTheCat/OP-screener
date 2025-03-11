@@ -9,7 +9,6 @@ import pickle  # Module for serializing and deserializing Python objects (used f
 import zipfile
 from typing import Dict
 
-import edgar
 import requests
 import yfinance as yf  # Yahoo Finance API to fetch financial data
 from sec_api import QueryApi  # API for querying SEC filings (limited requests)
@@ -22,29 +21,71 @@ import screener_information_picker as picky  # Custom module to extract specific
 
 from edgar import *
 
-class Company:
+
+class CompanyIns:
     def __init__(self, cik_str, ticker, title):
         self.cik = cik_str
         self.ticker = ticker
         self.title = title
-        self.years = []
+        self.years = {}  # Klíčem bude rok, hodnotou seznam kvartálních reportů
 
+class CompanyQuarter:
+    def __init__(self, quarter, filling):
+        self.quarter = quarter # Číslo kvartálu
+        self.filing = filling
 
 class CompanyData:
     def __init__(self, data: Dict):
-        self.companies: Dict[str, Company] = {
-            key: Company(**value) for key, value in data.items()
+        self.companies: Dict[str, CompanyIns] = {
+            key: CompanyIns(**value) for key, value in data.items()
         }
+def get_quarter(month):
+    if 1 <= month <= 3:
+        return 1
+    elif 4 <= month <= 6:
+        return 2
+    elif 7 <= month <= 9:
+        return 3
+    else:
+        return 4
 
 def SecTools_API():
     pass
 
-def SecTools_export_important_data(company):
-    company = Company(company["cik"])
-    fillings = company.get_filings(form="10-Q", is_xbrl= True)
+def SecTools_export_important_data(company, existing_data):
+    print(f"Processing filings for company: {company.cik}")
+
+    company_data = None
+
+    # Ověření, zda firma již existuje v datasetu
+    if company.cik in existing_data.companies:
+        company_data = existing_data.companies[company.cik]
+    else:
+        company_data = CompanyIns(company.cik, company.ticker, company.title)
+        existing_data.companies[company.cik] = company_data
+
+    # Získání všech filings pro danou společnost
+    company_obj = Company(company.cik)
+    fillings = company_obj.get_filings(form=["10-Q","10-K"], is_xbrl=True, date="2020-01-01:2022-01-01")
 
     for filing in fillings:
-        quartals = filing
+        reporting_for_date = filing.filing_date  # Formát datetime("YYYY-MM-DD")
+        year = reporting_for_date.year # Extrahujeme rok
+        quarter = get_quarter(reporting_for_date.month) # Extrahujeme quartál
+
+        # Ověříme, zda už existují reporty pro tento rok
+        if year not in company_data.years:
+            company_data.years[year] = []  # Inicializujeme rok, pokud neexistuje
+
+        # Ověříme, zda už tento kvartál není zpracován
+        if not any(q.quarter == quarter for q in company_data.years[year]):
+            company_data.years[year].append(CompanyQuarter(quarter, filing))
+
+    # Seřadíme kvartální reporty v každém roce podle čísla kvartálu (Q1 → Q3)
+    for year in company_data.years:
+        company_data.years[year].sort(key=lambda x: x.quarter)
+
+    return company_data
 
 def SecTools_all_fillings_for_companies(list_all_companies,filling_type):
     companies_data = CompanyData(list_all_companies)
@@ -96,6 +137,8 @@ def get_company_concept(concept, company_ticker, quarter, list_of_companies):
 
 def expert():
     all_companies = get_all_current_companies()
+    for company in all_companies:
+        print(all_companies[company]["cik_str"])
     if all_companies:
         SecTools_all_fillings_for_companies(all_companies, "10-Q")
 
@@ -238,6 +281,15 @@ headers = {
         'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
         }
 
+test = CompanyIns("320193", "AAPL", "Apple Inc.")
+
 set_identity("Alfred AlfredNem@gmail.com")
+
+saved_data = CompanyData({})
+#saved_data.companies[test.cik] = test
+
+SecTools_export_important_data(test,saved_data)
+
+pass
 
 expert()
