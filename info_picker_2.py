@@ -79,6 +79,23 @@ class CompanyData:
         else:
             print("No saved company list found.")
 
+def get_sheet_variable(variable,sheet):
+    try:
+        df = sheet.data
+        labels = sheet.labels
+
+        # Look for the label 'Total assets' (case insensitive)
+        for i, label in enumerate(labels):
+            if label.strip().lower() == variable.strip().lower():
+                variable_row = df.iloc[i]
+                first_value = variable_row.dropna().iloc[0]  # Get the first non-null value
+                return first_value  # Return just the number, e.g., 190000
+
+        print("variable not found in sheet.")
+        return None
+    except Exception as e:
+        print(f"Error while extracting variable: {e}")
+        return None
 
 def download_company_tickers():
     """Fetch the latest company tickers list from SEC."""
@@ -108,22 +125,35 @@ def SecTools_export_important_data(company, existing_data):
     company_data = existing_data.companies.get(company.cik, CompanyIns(company.cik, company.ticker, company.title))
 
     company_obj = Company(company.cik)
-    fillings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2020-01-01:2022-01-01")
+    filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2020-01-01:2022-01-01")
 
-    for filing in fillings:
+    for filing in filings:
+        # Parse the XBRL data
+        xbrl_data = filing.xbrl()
+        if xbrl_data is None:
+            continue
+
+        # Access the financial statements
+        filing_financials = Financials(xbrl_data)
+
+        # Retrieve the reporting date
         reporting_date = filing.filing_date
         year = reporting_date.year
 
-        # Pokud rok ještě není v datech, přidáme ho
+        # Store the balance sheet data
         if year not in company_data.years:
             company_data.years[year] = []
 
-        # Ověření, zda už dané datum existuje v tomto roce
-        exists = any(financial.date == reporting_date for financial in company_data.years[year])
+        # Check if this reporting date already exists
+        exists = any(
+            financial.date == reporting_date
+            for financial in company_data.years[year]
+        )
 
-        # Pokud datum ještě neexistuje, přidáme nový záznam
         if not exists:
-            company_data.years[year].append(CompanyFinancials(reporting_date, filing))
+            company_data.years[year].append(
+                CompanyFinancials(reporting_date, filing_financials)
+            )
 
     return company_data
 
@@ -214,6 +244,6 @@ update_company_list()
 # Example test case
 test = CompanyIns("320193", "AAPL", "Apple Inc.")
 saved_data = CompanyData({})
-SecTools_export_important_data(test, saved_data)
+#SecTools_export_important_data(test, saved_data)
 
 expert()

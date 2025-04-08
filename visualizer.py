@@ -32,8 +32,8 @@ def update_graph(selected_ciks):
     if not selected_ciks:
         fig.update_layout(
             title="Vyberte alespoň jednu společnost pro zobrazení dat.",
-            xaxis_title="Čas (Rok-Čtvrtletí)",
-            yaxis_title="Hodnota z filingů"
+            xaxis_title="Datum filingů",
+            yaxis_title="Total Assets"
         )
         return fig
 
@@ -42,12 +42,26 @@ def update_graph(selected_ciks):
         if not company:
             continue
 
+        # Pokud chybí data, stáhneme je
+        if not company.years or all(len(q) == 0 for q in company.years.values()):
+            updated_company = info_picker_2.SecTools_export_important_data(company, companies)
+            if updated_company:
+                companies.companies[cik] = updated_company
+                company = updated_company
+
         x_values = []
         y_values = []
-        for year, quarters in company.years.items():
-            for quarter in quarters:
-                x_values.append(f"{year}-Q{quarter.quarter}")
-                y_values.append(quarter.filing.filing_date.year)  # Změnit podle požadované hodnoty
+
+        for year, filings in company.years.items():
+            for filing in filings:
+                if filing.date and filing.financials:
+                    x_values.append(filing.date)
+                    temp = info_picker_2.get_sheet_variable("Total assets", filing.financials.balance_sheet)
+                    if temp is not None and len(temp) > 0:
+                        y_values.append(int(temp))
+
+        if not x_values or not y_values:
+            continue
 
         fig.add_trace(go.Scatter(
             x=x_values,
@@ -57,10 +71,11 @@ def update_graph(selected_ciks):
         ))
 
     fig.update_layout(
-        title="Vývoj hodnot filingů",
-        xaxis_title="Čas (Rok-Čtvrtletí)",
-        yaxis_title="Hodnota z filingů",
+        title="Vývoj Total Assets v čase",
+        xaxis_title="Datum filingů",
+        yaxis_title="Total Assets",
         xaxis=dict(tickangle=-45),
+        yaxis=dict(autorange=True),
         template="plotly_dark"
     )
     return fig
