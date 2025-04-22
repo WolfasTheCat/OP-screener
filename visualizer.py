@@ -15,7 +15,7 @@ app.layout = html.Div([
     html.H1("Interaktivní vizualizace filingů"),
     dcc.Dropdown(
         id='company-dropdown',
-        options=[{'label': v.title, 'value': k} for k, v in companies.companies.items()],
+        options=[{'label': v.title + " ("+ k +")", 'value': k} for k, v in companies.companies.items()],
         multi=True,
         placeholder="Vyberte jednu či více společností"
     ),
