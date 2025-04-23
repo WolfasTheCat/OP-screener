@@ -1,5 +1,6 @@
 import io
 import pickle
+import uuid
 import zipfile
 import json
 import os
@@ -30,9 +31,10 @@ class CompanyIns:
 
 
 class CompanyFinancials:
-    def __init__(self, date, filling):
+    def __init__(self, date, filling, location=None):
         self.date = date
         self.financials = filling
+        self.location = location  # Add this line
 
 
 class CompanyData:
@@ -79,6 +81,43 @@ class CompanyData:
         else:
             print("No saved company list found.")
 
+
+def save_xbrl_to_disk(xbrl_data, ticker, reporting_date):
+    """
+    Saves XBRL data to disk and returns the file path.
+
+    Args:
+        xbrl_data (str or bytes): The raw or serialized XBRL content.
+        ticker (str): Stock ticker (used in file naming).
+        reporting_date (datetime): Date of the report (used in file naming).
+
+    Returns:
+        str: Path to the saved file.
+    """
+    # Ensure the directory exists
+    directory = "xbrl_data"
+    os.makedirs(directory, exist_ok=True)
+
+    # Unique filename
+    safe_date = reporting_date.strftime("%Y-%m-%d")
+    filename = f"{ticker}_{safe_date}_{uuid.uuid4().hex[:8]}.xbrl"
+    file_path = os.path.join(directory, filename)
+
+    try:
+        # Save as binary if it's raw XML (bytes)
+        if isinstance(xbrl_data, bytes):
+            with open(file_path, "wb") as f:
+                f.write(xbrl_data)
+        else:
+            # Otherwise treat as string/serializable text
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(str(xbrl_data))
+    except Exception as e:
+        print(f"Error saving XBRL file: {e}")
+        return None
+
+    return file_path
+
 def get_sheet_variable(variable,sheet):
     try:
         df = sheet.data
@@ -122,7 +161,10 @@ def update_company_list():
 def SecTools_export_important_data(company, existing_data):
     print(f"Processing filings for company: {company.cik}")
 
-    company_data = existing_data.companies.get(company.cik, CompanyIns(company.cik, company.ticker, company.title))
+    company_data = existing_data.companies.get(
+        company.cik,
+        CompanyIns(company.cik, company.ticker, company.title)
+    )
 
     company_obj = Company(company.cik)
     filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2020-01-01:2022-01-01")
@@ -133,14 +175,24 @@ def SecTools_export_important_data(company, existing_data):
         if xbrl_data is None:
             continue
 
-        # Access the financial statements
-        filing_financials = Financials(xbrl_data)
+        xbrl_content = None
+        # Determine content to save
+        if hasattr(filing, 'xbrl_raw'):
+            xbrl_content = filing.xbrl_raw
+        else:
+            xbrl_content = xbrl_data
 
-        # Retrieve the reporting date
+        # Get the reporting date and year
         reporting_date = filing.filing_date
         year = reporting_date.year
 
-        # Store the balance sheet data
+        # Save the XBRL content to disk
+        file_path = save_xbrl_to_disk(xbrl_content, company.ticker, reporting_date)
+
+        # Access the financial statements
+        filing_financials = Financials(xbrl_data)
+
+        # Initialize the year entry if it doesn't exist
         if year not in company_data.years:
             company_data.years[year] = []
 
@@ -152,7 +204,7 @@ def SecTools_export_important_data(company, existing_data):
 
         if not exists:
             company_data.years[year].append(
-                CompanyFinancials(reporting_date, filing_financials)
+                CompanyFinancials(reporting_date, filing_financials, location=file_path)
             )
 
     return company_data
