@@ -1,4 +1,8 @@
+import os
+import json
+
 import dash
+import pandas as pd
 from dash import dcc, html
 from dash.dependencies import Input, Output
 import plotly.graph_objects as go
@@ -42,8 +46,45 @@ def update_graph(selected_ciks):
         if not company:
             continue
 
-        # Pokud chybí data, stáhneme je
-        if not company.years or all(len(q) == 0 for q in company.years.values()):
+        # Load saved XBRL data from disk if available
+        loaded_any = False
+        for year in range(2018, 2024):  # Or use a smarter range based on app context
+            year_str = str(year)
+            company.years[year] = []
+
+            json_dir = "xbrl_data_json/"+company.ticker
+            if not os.path.exists(json_dir):
+                continue
+
+            for file in os.listdir(json_dir):
+                if company.ticker in file and year_str in file and file.endswith(".json"):
+                    filepath = os.path.join(json_dir, file)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            json_data = json.load(f)
+
+                        date = pd.to_datetime(json_data["date"])
+
+                        def make_sheet(data_dict):
+                            df = pd.DataFrame.from_dict(data_dict)
+                            return type("Sheet", (object,), {"data": df})()
+
+                        financials = type("Financials", (object,), {
+                            "balance_sheet": make_sheet(json_data.get("balance_sheet", {})),
+                            "income": make_sheet(json_data.get("income", {})),
+                            "cashflow": make_sheet(json_data.get("cashflow", {})),
+                        })()
+
+                        company.years[year].append(
+                            info_picker_2.CompanyFinancials(date, financials, location=filepath)
+                        )
+                        loaded_any = True
+                    except Exception as e:
+                        print(f"Failed to load financials JSON from {file}: {e}")
+                        continue
+
+        # Fallback: Download if no local data
+        if not loaded_any:
             updated_company = info_picker_2.SecTools_export_important_data(company, companies)
             if updated_company:
                 companies.companies[cik] = updated_company

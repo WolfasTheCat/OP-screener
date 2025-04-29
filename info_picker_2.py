@@ -118,6 +118,29 @@ def save_xbrl_to_disk(xbrl_data, ticker, reporting_date):
 
     return file_path
 
+def save_financials_as_json(financials_file, ticker, reporting_date):
+    directory = "xbrl_data_json/"+ticker
+    os.makedirs(directory, exist_ok=True)
+
+    safe_date = reporting_date.strftime("%Y-%m-%d")
+    filename = f"{ticker}_{safe_date}_{uuid.uuid4().hex[:8]}.json"
+    file_path = os.path.join(directory, filename)
+
+    try:
+        data = {
+            "balance_sheet": financials_file.balance_sheet.data.to_dict(),
+            "income": financials_file.income.data.to_dict(),
+            "cashflow": financials_file.cashflow.data.to_dict(),
+            "date": safe_date
+        }
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving financials JSON: {e}")
+        return None
+
+    return file_path
+
 def get_sheet_variable(variable,sheet):
     try:
         df = sheet.data
@@ -167,36 +190,31 @@ def SecTools_export_important_data(company, existing_data):
     )
 
     company_obj = Company(company.cik)
-    filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2020-01-01:2022-01-01")
+    filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2018-01-01:2023-12-31")
 
     for filing in filings:
-        # Parse the XBRL data
         xbrl_data = filing.xbrl()
         if xbrl_data is None:
             continue
 
-        xbrl_content = None
-        # Determine content to save
-        if hasattr(filing, 'xbrl_raw'):
-            xbrl_content = filing.xbrl_raw
-        else:
-            xbrl_content = xbrl_data
+        try:
+            # Create financials object
+            file_financials = Financials(xbrl_data)
+        except Exception as e:
+            print(f"Error creating Financials object: {e}")
+            continue
 
-        # Get the reporting date and year
         reporting_date = filing.filing_date
         year = reporting_date.year
 
-        # Save the XBRL content to disk
-        file_path = save_xbrl_to_disk(xbrl_content, company.ticker, reporting_date)
+        # Save financials to JSON
+        file_path = save_financials_as_json(file_financials, company.ticker, reporting_date)
+        if not file_path:
+            continue
 
-        # Access the financial statements
-        filing_financials = Financials(xbrl_data)
-
-        # Initialize the year entry if it doesn't exist
         if year not in company_data.years:
             company_data.years[year] = []
 
-        # Check if this reporting date already exists
         exists = any(
             financial.date == reporting_date
             for financial in company_data.years[year]
@@ -204,7 +222,7 @@ def SecTools_export_important_data(company, existing_data):
 
         if not exists:
             company_data.years[year].append(
-                CompanyFinancials(reporting_date, filing_financials, location=file_path)
+                CompanyFinancials(reporting_date, file_financials, location=file_path)
             )
 
     return company_data
