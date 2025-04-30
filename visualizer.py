@@ -1,125 +1,189 @@
 import os
 import json
+from datetime import datetime
 
 import dash
 import pandas as pd
 from dash import dcc, html
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
-import info_picker_2  # Import funkcí pro zpracování filing dat
+import info_picker_2
 
-# Inicializace Dash aplikace
 app = dash.Dash(__name__)
-
-# Získání seznamu společností
 companies = info_picker_2.CompanyData()
 companies.load_saved_companies()
 
+year_range = {"start": 2018, "end": datetime.now().year-3}
+
 app.layout = html.Div([
     html.H1("Interaktivní vizualizace filingů"),
+
     dcc.Dropdown(
         id='company-dropdown',
-        options=[{'label': v.title + " ("+ k +")", 'value': k} for k, v in companies.companies.items()],
+        options=[{'label': f"{v.title} ({k})", 'value': k} for k, v in companies.companies.items()],
         multi=True,
         placeholder="Vyberte jednu či více společností"
     ),
+
+    dcc.Dropdown(
+        id='variable-dropdown',
+        options=[],
+        multi=True,
+        placeholder="Vyberte jednu nebo více proměnných"
+    ),
+
+    html.Div([
+        html.Label("Rozsah let:"),
+        html.Div([
+            dcc.Input(id='year-start-input', type='number', step=1, value=year_range["start"],
+                      placeholder="Od roku", style={'marginRight': '20px'}),
+            dcc.Input(id='year-end-input', type='number', step=1, value=year_range["end"],
+                      placeholder="Do roku")
+        ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '20px'})
+    ]),
+
+    html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={"marginBottom": "30px"}),
+
     dcc.Graph(id='filing-graph')
 ])
 
 
-@app.callback(
-    Output('filing-graph', 'figure'),
-    [Input('company-dropdown', 'value')]
-)
-def update_graph(selected_ciks):
+def generate_graph(selected_ciks, selected_variables, start_year, end_year):
     fig = go.Figure()
     if not selected_ciks:
-        fig.update_layout(
-            title="Vyberte alespoň jednu společnost pro zobrazení dat.",
-            xaxis_title="Datum filingů",
-            yaxis_title="Total Assets"
-        )
+        fig.update_layout(title="Vyberte alespoň jednu společnost.", xaxis_title="Datum", yaxis_title="Hodnota")
+        return fig
+
+    if not selected_variables:
+        selected_variables = ["total assets"]
+        print("[INFO] Výchozí proměnná: total assets")
+
+    current_year = datetime.now().year
+    start_year, end_year = min(start_year, end_year), max(start_year, end_year)
+    if start_year > current_year or end_year > current_year:
+        print(f"[ERROR] Rok mimo rozsah. Aktuální rok: {current_year}")
         return fig
 
     for cik in selected_ciks:
         company = companies.companies.get(cik)
         if not company:
             continue
+        print(f"[DEBUG] Zpracovávám: {company.ticker} ({company.title})")
+        loaded_years = set()
+        json_dir = f"xbrl_data_json/{company.ticker}"
 
-        # Load saved XBRL data from disk if available
-        loaded_any = False
-        for year in range(2018, 2024):  # Or use a smarter range based on app context
-            year_str = str(year)
-            company.years[year] = []
-
-            json_dir = "xbrl_data_json/"+company.ticker
-            if not os.path.exists(json_dir):
-                continue
-
+        if os.path.exists(json_dir):
             for file in os.listdir(json_dir):
-                if company.ticker in file and year_str in file and file.endswith(".json"):
+                if file.endswith(".json") and company.ticker in file:
                     filepath = os.path.join(json_dir, file)
                     try:
                         with open(filepath, 'r', encoding='utf-8') as f:
                             json_data = json.load(f)
-
                         date = pd.to_datetime(json_data["date"])
+                        year = date.year
+                        if not (start_year <= year <= end_year):
+                            continue
 
                         def make_sheet(data_dict):
-                            df = pd.DataFrame.from_dict(data_dict)
-                            return type("Sheet", (object,), {"data": df})()
+                            return type("Sheet", (object,), {
+                                "data": pd.DataFrame.from_dict(data_dict)
+                            })()
 
                         financials = type("Financials", (object,), {
                             "balance_sheet": make_sheet(json_data.get("balance_sheet", {})),
                             "income": make_sheet(json_data.get("income", {})),
-                            "cashflow": make_sheet(json_data.get("cashflow", {})),
+                            "cashflow": make_sheet(json_data.get("cashflow", {}))
                         })()
 
-                        company.years[year].append(
-                            info_picker_2.CompanyFinancials(date, financials, location=filepath)
-                        )
-                        loaded_any = True
+                        if year not in company.years:
+                            company.years[year] = []
+                        if not any(f.date == date for f in company.years[year]):
+                            company.years[year].append(
+                                info_picker_2.CompanyFinancials(date, financials, location=filepath)
+                            )
+                        loaded_years.add(year)
+                        print(f"[DEBUG] Načítám soubor: {filepath}")
                     except Exception as e:
-                        print(f"Failed to load financials JSON from {file}: {e}")
+                        print(f"[ERROR] Chyba při načítání {file}: {e}")
+
+        for year in range(start_year, end_year + 1):
+            if year not in loaded_years:
+                print(f"[DEBUG] Stahuji rok {year}...")
+                updated_company = info_picker_2.SecTools_export_important_data(company, companies)
+                if updated_company:
+                    companies.companies[cik] = updated_company
+                    company = updated_company
+                    print(f"[DEBUG] Staženo: {company.ticker}")
+                else:
+                    print(f"[ERROR] Stažení selhalo: {company.ticker}")
+                break
+
+        for variable in selected_variables:
+            x_values, y_values = [], []
+            print(f"[DEBUG] Hledám proměnnou: {variable}")
+            for year, filings in company.years.items():
+                if not (start_year <= year <= end_year):
+                    continue
+                for filing in filings:
+                    if not (filing.date and filing.financials):
                         continue
+                    value = None
+                    for sheet_name in ["balance_sheet", "income", "cashflow"]:
+                        sheet = getattr(filing.financials, sheet_name)
+                        value = info_picker_2.get_file_variable(variable, sheet, year)
+                        if value is not None:
+                            break
+                    try:
+                        y = float(value) if value is not None else None
+                    except ValueError:
+                        y = None
+                    x_values.append(pd.to_datetime(filing.date))
+                    y_values.append(y)
 
-        # Fallback: Download if no local data
-        if not loaded_any:
-            updated_company = info_picker_2.SecTools_export_important_data(company, companies)
-            if updated_company:
-                companies.companies[cik] = updated_company
-                company = updated_company
-
-        x_values = []
-        y_values = []
-
-        for year, filings in company.years.items():
-            for filing in filings:
-                if filing.date and filing.financials:
-                    x_values.append(filing.date)
-                    temp = info_picker_2.get_sheet_variable("Total assets", filing.financials.balance_sheet)
-                    if temp is not None and len(temp) > 0:
-                        y_values.append(int(temp))
-
-        if not x_values or not y_values:
-            continue
-
-        fig.add_trace(go.Scatter(
-            x=x_values,
-            y=y_values,
-            mode='lines+markers',
-            name=company.title
-        ))
+            combined = [(d, v) for d, v in zip(x_values, y_values) if v is not None]
+            combined.sort(key=lambda x: x[0])
+            if combined:
+                x_sorted, y_sorted = zip(*combined)
+                fig.add_trace(go.Scatter(
+                    x=x_sorted, y=y_sorted,
+                    mode='lines+markers',
+                    name=f"{company.title} - {variable}"
+                ))
+            else:
+                print(f"[WARNING] Žádná data pro {company.title} - {variable}")
 
     fig.update_layout(
-        title="Vývoj Total Assets v čase",
+        title="Vývoj vybraných proměnných",
         xaxis_title="Datum filingů",
-        yaxis_title="Total Assets",
-        xaxis=dict(tickangle=-45),
-        yaxis=dict(autorange=True),
+        yaxis_title="Hodnota",
         template="plotly_dark"
     )
     return fig
+
+
+@app.callback(
+    Output('filing-graph', 'figure'),
+    [Input('company-dropdown', 'value'),
+     Input('draw-button', 'n_clicks')],
+    [State('variable-dropdown', 'value'),
+     State('year-start-input', 'value'),
+     State('year-end-input', 'value')]
+)
+def unified_callback(selected_ciks, n_clicks, selected_variables, start_year, end_year):
+    from dash import callback_context
+    trigger = callback_context.triggered[0]["prop_id"].split(".")[0]
+
+    if trigger == "draw-button":
+        if start_year and end_year:
+            year_range["start"] = start_year
+            year_range["end"] = end_year
+
+    return generate_graph(
+        selected_ciks or [],
+        selected_variables or [],
+        year_range["start"],
+        year_range["end"]
+    )
 
 
 if __name__ == '__main__':

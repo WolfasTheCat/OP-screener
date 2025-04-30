@@ -141,23 +141,47 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
 
     return file_path
 
-def get_sheet_variable(variable,sheet):
+VARIABLE_ALIASES = {
+    "total assets": ["total assets", "assets"],
+    "total liabilities": ["total liabilities", "liabilities"],
+    "cash": ["cash", "cash and cash equivalents at carrying value"]
+}
+
+def get_file_variable(variable, sheet_object, year):
     try:
-        df = sheet.data
-        labels = sheet.labels
+        df = sheet_object.data
 
-        # Look for the label 'Total assets' (case insensitive)
-        for i, label in enumerate(labels):
-            if label.strip().lower() == variable.strip().lower():
-                variable_row = df.iloc[i]
-                first_value = variable_row.dropna().iloc[0]  # Get the first non-null value
-                return first_value  # Return just the number, e.g., 190000
+        if df.empty:
+            print(f"[WARNING] DataFrame je prázdný pro rok {year}.")
+            return None
 
-        print("variable not found in sheet.")
+        # Standardizace dotazu
+        var_norm = variable.strip().lower()
+
+        # Seznam možných variant názvu
+        candidate_labels = VARIABLE_ALIASES.get(var_norm, [var_norm])
+
+        # 1. Přesná shoda (case-insensitive)
+        for name in candidate_labels:
+            for row_label in df.index:
+                if row_label.strip().lower() == name:
+                    print(f"[DEBUG] Načteno: přesná shoda '{row_label}'")
+                    return df.loc[row_label].dropna().iloc[0]
+
+        # 2. Částečná shoda
+        for name in candidate_labels:
+            for row_label in df.index:
+                if name in row_label.strip().lower():
+                    print(f"[DEBUG] Načteno: částečná shoda '{row_label}'")
+                    return df.loc[row_label].dropna().iloc[0]
+
+        print(f"[DEBUG] Proměnná '{variable}' nebyla nalezena v žádné podobě.")
         return None
+
     except Exception as e:
-        print(f"Error while extracting variable: {e}")
+        print(f"[ERROR] Error while extracting variable: {e}")
         return None
+
 
 def download_company_tickers():
     """Fetch the latest company tickers list from SEC."""
@@ -182,7 +206,7 @@ def update_company_list():
     company_data.update_companies(new_data)
 
 def SecTools_export_important_data(company, existing_data):
-    print(f"Processing filings for company: {company.cik}")
+    print(f"[INFO] Zpracovávám filings pro společnost: {company.cik} ({company.ticker})")
 
     company_data = existing_data.companies.get(
         company.cik,
@@ -190,48 +214,55 @@ def SecTools_export_important_data(company, existing_data):
     )
 
     company_obj = Company(company.cik)
-    filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2018-01-01:2023-12-31")
+    filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2017-01-01:2023-12-31")
 
     for filing in filings:
         xbrl_data = filing.xbrl()
         if xbrl_data is None:
+            print("[WARNING] Žádná XBRL data ve filing.")
             continue
 
         try:
-            # Create financials object
             file_financials = Financials(xbrl_data)
         except Exception as e:
-            print(f"Error creating Financials object: {e}")
+            print(f"[ERROR] Chyba při vytváření objektu Financials: {e}")
             continue
 
         reporting_date = filing.filing_date
         year = reporting_date.year
+        safe_date = reporting_date.strftime("%Y-%m-%d")
+        json_dir = f"xbrl_data_json/{company.ticker}"
+        duplicate_found = False
 
-        # Save financials to JSON
+        # Kontrola na duplicitní JSON
+        if os.path.exists(json_dir):
+            for existing_file in os.listdir(json_dir):
+                if existing_file.endswith(".json") and safe_date in existing_file:
+                    print(f"[DEBUG] JSON pro {company.ticker} na {safe_date} už existuje, přeskočeno.")
+                    duplicate_found = True
+                    break
+
+        if duplicate_found:
+            continue  # Přeskoč zbytek a pokračuj dalším filingem
+
+        # Uložení JSON
         file_path = save_financials_as_json(file_financials, company.ticker, reporting_date)
         if not file_path:
+            print("[ERROR] Nepodařilo se uložit JSON.")
             continue
 
         if year not in company_data.years:
             company_data.years[year] = []
 
-        exists = any(
-            financial.date == reporting_date
-            for financial in company_data.years[year]
-        )
-
+        # Kontrola, zda již filing pro tento datum není v paměti
+        exists = any(f.date == reporting_date for f in company_data.years[year])
         if not exists:
             company_data.years[year].append(
                 CompanyFinancials(reporting_date, file_financials, location=file_path)
             )
+            print(f"[INFO] Uloženo: {company.ticker} – {safe_date}")
 
     return company_data
-
-
-def SecTools_all_fillings_for_companies(list_all_companies, filling_type):
-    companies_data = CompanyData(list_all_companies)
-    return 0
-
 
 def __edgar_API(years, quarter):
     link = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
@@ -258,51 +289,15 @@ def get_overview_file(link, years, quarter):
             print("Zip file downloaded")
             z_file.extractall(f"xbrl_{current_year}_Q{quarter}")
             result.append(z_file)
+            return None
         else:
             print("Not able to download zip file")
             return None
-
-
-def expert():
-    all_companies = get_all_current_companies()
-    if all_companies:
-        SecTools_all_fillings_for_companies(all_companies, "10-Q")
+    return None
 
 
 def price_earning_ratio(share_price, earnings_per_share):
     return share_price / earnings_per_share
-
-
-def calculate_PE(company_ticker):
-    with open(company_ticker + ".json", 'rb') as f:
-        xbrl_json = pickle.load(f)
-
-    earning_per_share = xbrl_json["StatementsOfIncome"]["EarningsPerShareDiluted"]
-    earnings_data = {"date": [], "value": []}
-    earnings_data_separated = {}
-
-    for earning in earning_per_share:
-        period_start = earning["period"]["startDate"]
-        period_end = earning["period"]["endDate"]
-        earning_per_period = float(earning["value"])
-
-        earnings_data_separated[earning["value"]] = {"date": [], "value": []}
-
-        data_period = yf.download(company_ticker, start=period_start, end=period_end)
-
-        for date in data_period.index:
-            close_price = data_period["Close"][date]
-            pe = price_earning_ratio(close_price, earning_per_period)
-
-            earnings_data["date"].append(date)
-            earnings_data["value"].append(pe)
-            earnings_data_separated[earning["value"]]["date"].append(date)
-            earnings_data_separated[earning["value"]]["value"].append(pe)
-
-    with open(company_ticker + "_PE" + ".json", 'wb') as f:
-        pickle.dump(earnings_data, f)
-    with open(company_ticker + "D_PE" + ".json", 'wb') as f:
-        pickle.dump(earnings_data_separated, f)
 
 
 # Set user identity for EDGAR API
@@ -315,5 +310,3 @@ update_company_list()
 test = CompanyIns("320193", "AAPL", "Apple Inc.")
 saved_data = CompanyData({})
 #SecTools_export_important_data(test, saved_data)
-
-expert()
