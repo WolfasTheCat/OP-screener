@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import info_picker_2
 
 
-# CONSTANTS
+# ----------------------------- CONSTANTS -----------------------------------
 VARIABLE_SHEETS = {
     "total assets": "balance_sheet",
     "total liabilities": "balance_sheet",
@@ -21,12 +21,12 @@ VARIABLES = list(VARIABLE_SHEETS.keys())
 YEAR_RANGE = {"start": 2018, "end": datetime.now().year - 3}
 
 
-# LOAD COMPANY DATA
+# ----------------------------- LOAD COMPANY DATA ---------------------------
 companies = info_picker_2.CompanyData()
 companies.load_saved_companies()
 
 
-# FUNCTIONS
+# ----------------------------- FUNCTIONS -----------------------------------
 
 def load_summary_table():
     records = []
@@ -77,7 +77,15 @@ def load_summary_table():
             except Exception as e:
                 print(f"[ERROR] {filepath} – {e}")
 
-    df = pd.DataFrame(records)
+    columns = ["CIK", "Ticker", "Company", "Date"] + VARIABLES
+    df = pd.DataFrame(records, columns=columns)
+
+    if df.empty:
+        print("[WARNING] Žádné záznamy nebyly načteny.")
+        return df  # nebo return pd.DataFrame(columns=["CIK", "Ticker", "Company", "Date", ...])
+
+    print("Sloupce v df:", df.columns)  # ladění
+
     df.sort_values(["Company", "Date"], inplace=True)
     return df
 
@@ -198,8 +206,38 @@ def filter_summary_table(n_clicks, filter_value):
         return summary_df.to_dict("records")
 
 
-# APP & CALLBACK
+# ----------------------------- APP & CALLBACK ------------------------------
+
 app = dash.Dash(__name__)
+
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>Filing Visualizer</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            body, html {
+                margin: 0;
+                padding: 0;
+                background-color: #1a1a1a;
+                font-family: sans-serif;
+                overflow-x: hidden;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
 
 summary_df = load_summary_table()
 summary_columns = [{"name": col, "id": col} for col in summary_df.columns]
@@ -210,23 +248,17 @@ summary_data = summary_df.to_dict("records")
      Output('error-message', 'children'),
      Output('summary-table', 'data')],
     Input('draw-button', 'n_clicks'),
-    Input('filter-button', 'n_clicks'),
     [State('company-dropdown', 'value'),
      State('variable-dropdown', 'value'),
      State('year-start-input', 'value'),
      State('year-end-input', 'value'),
      State('filing-graph', 'figure')],
-    State('filter-input', 'value')
 )
-def unified_callback(draw_clicks, filter_clicks,
+def unified_callback(draw_clicks,
                      selected_ciks, selected_variables,
-                     start_year, end_year, current_fig,
-                     filter_value):
+                     start_year, end_year, current_fig
+                     ):
     triggered = callback_context.triggered[0]["prop_id"].split(".")[0]
-
-    if triggered == "filter-button":
-        filtered_data = filter_summary_table(filter_clicks, filter_value)
-        return no_update, no_update, filtered_data
 
     if triggered == "draw-button":
         selected_ciks = [selected_ciks] if isinstance(selected_ciks, (str, int)) else (selected_ciks or [])
@@ -247,63 +279,96 @@ def unified_callback(draw_clicks, filter_clicks,
     return no_update, no_update, no_update
 
 
-# APP LAYOUT
+# ----------------------------- APP LAYOUT ----------------------------------
 
 app.layout = html.Div([
-    html.H1("Interaktivní vizualizace filingů"),
-
-    dcc.Dropdown(
-        id='company-dropdown',
-        options=[{'label': f"{v.title} ({k})", 'value': k} for k, v in companies.companies.items()],
-        multi=True,
-        placeholder="Vyberte jednu či více společností"
-    ),
-
-    dcc.Dropdown(
-        id='variable-dropdown',
-        options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
-        multi=True,
-        placeholder="Vyberte jednu nebo více proměnných"
-    ),
+    html.H1("Interaktivní vizualizace filingů", style={
+        "textAlign": "center",
+        "color": "#FFFFFF",
+        "marginBottom": "30px"
+    }),
 
     html.Div([
-        html.Label("Rozsah let:"),
         html.Div([
-            dcc.Input(id='year-start-input', type='number', step=1, value=YEAR_RANGE["start"],
-                      placeholder="Od roku", style={'marginRight': '20px'}),
-            dcc.Input(id='year-end-input', type='number', step=1, value=YEAR_RANGE["end"],
-                      placeholder="Do roku")
-        ], style={'display': 'flex', 'alignItems': 'center', 'marginBottom': '20px'})
-    ]),
+            html.Label("Vyberte společnost:", style={"fontWeight": "bold", "color": "white"}),
+            dcc.Dropdown(
+                id='company-dropdown',
+                options=[{'label': f"{v.title} ({k})", 'value': k} for k, v in companies.companies.items()],
+                multi=True,
+                placeholder="Vyberte jednu či více společností"
+            ),
+        ], style={'marginBottom': '20px'}),
 
-    html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={"marginBottom": "30px"}),
-    html.Div(id='error-message', style={'color': 'red', 'marginBottom': '20px'}),
+        html.Div([
+            html.Label("Vyberte proměnné:", style={"fontWeight": "bold", "color": "white"}),
+            dcc.Dropdown(
+                id='variable-dropdown',
+                options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
+                multi=True,
+                placeholder="Vyberte jednu nebo více proměnných"
+            ),
+        ], style={'marginBottom': '20px'}),
 
-    dcc.Graph(id='filing-graph'),
+        html.Div([
+            html.Label("Rozsah let:", style={"fontWeight": "bold", "color": "white"}),
+            html.Div([
+                dcc.Input(id='year-start-input', type='number', step=1, value=YEAR_RANGE["start"],
+                          placeholder="Od roku", style={'marginRight': '20px', 'width': '100px'}),
+                dcc.Input(id='year-end-input', type='number', step=1, value=YEAR_RANGE["end"],
+                          placeholder="Do roku", style={'width': '100px'})
+            ], style={'display': 'flex', 'alignItems': 'center'}),
+        ], style={'marginBottom': '20px'}),
+
+        html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={
+            "backgroundColor": "#2D8CFF",
+            "color": "white",
+            "border": "none",
+            "padding": "10px 20px",
+            "borderRadius": "5px",
+            "cursor": "pointer",
+            "marginBottom": "20px"
+        }),
+
+        html.Div(id='error-message', style={'color': 'red', 'marginBottom': '20px'})
+    ], style={'maxWidth': '1200px', 'margin': '0 auto'}),
 
     html.Div([
-        html.H3("Tabulka ukazatelů"),
-        html.Div([
-            dcc.Input(id='filter-input', type='text', placeholder="Např. `total assets > 100000`",
-                      style={'width': '60%'}),
-            html.Button("Filtrovat", id='filter-button', n_clicks=0, style={'marginLeft': '10px'}),
-        ], style={"marginBottom": "15px"}),
+        dcc.Graph(
+            id='filing-graph',
+            style={"width": "100%"},
+            figure=go.Figure(layout={
+                "template": "plotly_dark",
+                "paper_bgcolor": "#000000",
+                "plot_bgcolor": "#000000"
+            })
+        ),
+        html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "#FFFFFF"}),
 
         dash_table.DataTable(
             id='summary-table',
             columns=summary_columns,
             data=summary_data,
-            style_table={'overflowX': 'auto'},
+            fixed_rows={'headers': True},
+            sort_action='native',
+            filter_action='native',
+            sort_mode="multi",
+            page_action='none',
+            style_table={
+                'maxHeight': '500px',
+                'overflowY': 'auto',
+                'overflowX': 'auto',
+                'border': '1px solid #444'
+            },
             style_cell={'textAlign': 'left', 'padding': '5px'},
             style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
             style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
-            page_size=20
         )
-    ])
-])
+    ], style={'maxWidth': '1200px', 'margin': '40px auto'})
+], style={'backgroundColor': '#1a1a1a', 'minHeight': '100vh', 'margin': '0', 'padding': '0'})
 
 
 
+# ----------------------------- RUN SERVER ----------------------------------
 
 if __name__ == '__main__':
     app.run(debug=True)

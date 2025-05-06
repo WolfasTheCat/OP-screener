@@ -11,6 +11,8 @@ from sec_api import QueryApi, XbrlApi
 from sec_edgar_api import EdgarClient
 from edgar import *
 
+from indicators import compute_ratios
+
 # File path for storing the company list
 FILE_PATH = "company_tickers.json"
 
@@ -144,6 +146,8 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
             "cashflow": financials_file.cashflow.data.to_dict(),
             "date": safe_date
         }
+        computed = compute_ratios(data["balance_sheet"], data["income"], data["cashflow"])
+        data["computed"] = computed
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
     except Exception as e:
@@ -151,7 +155,7 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
         return None
 
     return file_path
-def
+
 def get_file_variable(variable, sheet_object, year):
     try:
         df = sheet_object.data
