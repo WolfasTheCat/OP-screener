@@ -9,8 +9,6 @@ import yfinance as yf
 from typing import Dict
 from sec_api import QueryApi, XbrlApi
 from sec_edgar_api import EdgarClient
-import const
-import screener_information_picker as picky
 from edgar import *
 
 # File path for storing the company list
@@ -24,7 +22,15 @@ HEADERS = {
 VARIABLE_ALIASES = {
     "total assets": ["total assets", "assets"],
     "total liabilities": ["total liabilities", "liabilities"],
-    "cash": ["cash", "cash and cash equivalents at carrying value"]
+    "cash": ["cash", "cash and cash equivalents at carrying value"],
+    "Shares Outstanding": ["Weighted Average Number Of Shares Outstanding Basic"]
+}
+
+VARIABLE_SHEETS = {
+    "total assets": "balance_sheet",
+    "total liabilities": "balance_sheet",
+    "cash": "balance_sheet",
+    "Shares Outstanding": "income"
 }
 
 class CompanyIns:
@@ -145,7 +151,7 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
         return None
 
     return file_path
-
+def
 def get_file_variable(variable, sheet_object, year):
     try:
         df = sheet_object.data
