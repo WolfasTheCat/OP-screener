@@ -21,6 +21,11 @@ HEADERS = {
     'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
 }
 
+VARIABLE_ALIASES = {
+    "total assets": ["total assets", "assets"],
+    "total liabilities": ["total liabilities", "liabilities"],
+    "cash": ["cash", "cash and cash equivalents at carrying value"]
+}
 
 class CompanyIns:
     def __init__(self, cik_str, ticker, title):
@@ -141,12 +146,6 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
 
     return file_path
 
-VARIABLE_ALIASES = {
-    "total assets": ["total assets", "assets"],
-    "total liabilities": ["total liabilities", "liabilities"],
-    "cash": ["cash", "cash and cash equivalents at carrying value"]
-}
-
 def get_file_variable(variable, sheet_object, year):
     try:
         df = sheet_object.data
@@ -205,7 +204,7 @@ def update_company_list():
     company_data.load_saved_companies()
     company_data.update_companies(new_data)
 
-def SecTools_export_important_data(company, existing_data):
+def SecTools_export_important_data(company, existing_data, year):
     print(f"[INFO] Zpracovávám filings pro společnost: {company.cik} ({company.ticker})")
 
     company_data = existing_data.companies.get(
@@ -214,7 +213,7 @@ def SecTools_export_important_data(company, existing_data):
     )
 
     company_obj = Company(company.cik)
-    filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date="2017-01-01:2023-12-31")
+    filings = company_obj.get_filings(form=["10-Q", "10-K"], is_xbrl=True, date=f"{year}-01-01:{year}-12-31")
 
     for filing in filings:
         xbrl_data = filing.xbrl()
@@ -229,7 +228,6 @@ def SecTools_export_important_data(company, existing_data):
             continue
 
         reporting_date = filing.filing_date
-        year = reporting_date.year
         safe_date = reporting_date.strftime("%Y-%m-%d")
         json_dir = f"xbrl_data_json/{company.ticker}"
         duplicate_found = False

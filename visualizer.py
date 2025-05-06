@@ -4,7 +4,7 @@ from datetime import datetime
 
 import dash
 import pandas as pd
-from dash import dcc, html
+from dash import dcc, html, dash_table, callback_context, no_update
 from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
 import info_picker_2
@@ -14,6 +14,7 @@ companies = info_picker_2.CompanyData()
 companies.load_saved_companies()
 
 year_range = {"start": 2018, "end": datetime.now().year-3}
+variable_options = [{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()]
 
 app.layout = html.Div([
     html.H1("Interaktivní vizualizace filingů"),
@@ -27,7 +28,7 @@ app.layout = html.Div([
 
     dcc.Dropdown(
         id='variable-dropdown',
-        options=[],
+        options=variable_options,
         multi=True,
         placeholder="Vyberte jednu nebo více proměnných"
     ),
@@ -43,8 +44,22 @@ app.layout = html.Div([
     ]),
 
     html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={"marginBottom": "30px"}),
+    html.Div(id='error-message', style={'color': 'red', 'marginBottom': '20px'}),
 
-    dcc.Graph(id='filing-graph')
+    dcc.Graph(id='filing-graph'),
+
+    html.Div([
+        html.H3("Tabulka ukazatelů"),
+        dash_table.DataTable(
+            id='indicator-table',
+            columns=[],
+            data=[],
+            style_table={'overflowX': 'auto'},
+            style_cell={'textAlign': 'left', 'padding': '5px'},
+            style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
+            style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
+        )
+    ])
 ])
 
 
@@ -109,14 +124,13 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year):
         for year in range(start_year, end_year + 1):
             if year not in loaded_years:
                 print(f"[DEBUG] Stahuji rok {year}...")
-                updated_company = info_picker_2.SecTools_export_important_data(company, companies)
+                updated_company = info_picker_2.SecTools_export_important_data(company, companies, year)
                 if updated_company:
-                    companies.companies[cik] = updated_company
-                    company = updated_company
+                    # ✅ Pouze aktualizuj existující roky místo přepsání celé firmy
+                    company.years.update(updated_company.years)
                     print(f"[DEBUG] Staženo: {company.ticker}")
                 else:
                     print(f"[ERROR] Stažení selhalo: {company.ticker}")
-                break
 
         for variable in selected_variables:
             x_values, y_values = [], []
@@ -161,29 +175,34 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year):
     return fig
 
 
+
 @app.callback(
-    Output('filing-graph', 'figure'),
-    [Input('company-dropdown', 'value'),
-     Input('draw-button', 'n_clicks')],
-    [State('variable-dropdown', 'value'),
+    [Output('filing-graph', 'figure'),
+     Output('error-message', 'children')],
+    Input('draw-button', 'n_clicks'),
+    [State('company-dropdown', 'value'),
+     State('variable-dropdown', 'value'),
      State('year-start-input', 'value'),
-     State('year-end-input', 'value')]
+     State('year-end-input', 'value'),
+     State('filing-graph', 'figure')]  # <- přidáme starý graf jako vstup
 )
-def unified_callback(selected_ciks, n_clicks, selected_variables, start_year, end_year):
-    from dash import callback_context
-    trigger = callback_context.triggered[0]["prop_id"].split(".")[0]
+def unified_callback(n_clicks, selected_ciks, selected_variables, start_year, end_year, current_fig):
+    selected_ciks = [selected_ciks] if isinstance(selected_ciks, (str, int)) else (selected_ciks or [])
+    selected_variables = selected_variables or []
 
-    if trigger == "draw-button":
-        if start_year and end_year:
-            year_range["start"] = start_year
-            year_range["end"] = end_year
+    # Validace vstupních roků
+    if not (isinstance(start_year, int) and isinstance(end_year, int)):
+        return no_update, "Zadejte platné roky (např. 2018 až 2022)."
 
-    return generate_graph(
-        selected_ciks or [],
-        selected_variables or [],
-        year_range["start"],
-        year_range["end"]
-    )
+    if start_year > end_year:
+        return no_update, "Počáteční rok musí být menší nebo roven koncovému roku."
+
+    if not selected_ciks:
+        return no_update, "Vyberte alespoň jednu společnost."
+
+    # Všechno validní – vykresli nový graf
+    fig = generate_graph(selected_ciks, selected_variables, start_year, end_year)
+    return fig, ""
 
 
 if __name__ == '__main__':
