@@ -141,9 +141,9 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
 
     try:
         data = {
-            "balance_sheet": financials_file.balance_sheet.data.to_dict(),
-            "income": financials_file.income.data.to_dict(),
-            "cashflow": financials_file.cashflow.data.to_dict(),
+            "balance_sheet": financials_file.get_balance_sheet().data.to_dict(),
+            "income": financials_file.get_income_statement().data.to_dict(),
+            "cashflow": financials_file.get_cash_flow_statement().data.to_dict(),
             "date": safe_date
         }
         computed = compute_ratios(data["balance_sheet"], data["income"], data["cashflow"])
@@ -164,6 +164,10 @@ def get_file_variable(variable, sheet_object, year):
             print(f"[WARNING] DataFrame je prázdný pro rok {year}.")
             return None
 
+        # Pokud existuje sloupec "concept", filtruj pryč abstract řádky
+        if "concept" in df.columns:
+            df = df[~df["concept"].str.contains("Abstract", case=False, na=False)]
+
         # Standardizace dotazu
         var_norm = variable.strip().lower()
 
@@ -174,15 +178,17 @@ def get_file_variable(variable, sheet_object, year):
         for name in candidate_labels:
             for row_label in df.index:
                 if row_label.strip().lower() == name:
-                    print(f"[DEBUG] Načteno: přesná shoda '{row_label}'")
-                    return df.loc[row_label].dropna().iloc[0]
+                    value = df.loc[row_label].dropna().iloc[0]
+                    print(f"[DEBUG] Načteno: přesná shoda '{row_label}' → {value}")
+                    return value
 
         # 2. Částečná shoda
         for name in candidate_labels:
             for row_label in df.index:
                 if name in row_label.strip().lower():
-                    print(f"[DEBUG] Načteno: částečná shoda '{row_label}'")
-                    return df.loc[row_label].dropna().iloc[0]
+                    value = df.loc[row_label].dropna().iloc[0]
+                    print(f"[DEBUG] Načteno: částečná shoda '{row_label}' → {value}")
+                    return value
 
         print(f"[DEBUG] Proměnná '{variable}' nebyla nalezena v žádné podobě.")
         return None

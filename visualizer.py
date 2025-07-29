@@ -1,5 +1,6 @@
 import os
 import json
+import sys
 from datetime import datetime
 
 import dash
@@ -162,12 +163,30 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year):
                 for filing in filings:
                     if not (filing.date and filing.financials):
                         continue
+
+                    financials_obj = filing.financials
                     value = None
+
                     for sheet_name in ["balance_sheet", "income", "cashflow"]:
-                        sheet = getattr(filing.financials, sheet_name)
-                        value = info_picker_2.get_file_variable(variable, sheet, year)
-                        if value is not None:
-                            break
+                        sheet = None
+                        try:
+                            if hasattr(financials_obj, sheet_name):
+                                # Reading from JSON
+                                sheet = getattr(financials_obj, sheet_name)
+                            elif hasattr(financials_obj, f"get_{sheet_name}"):
+                                # Just downloaded
+                                raw_df = getattr(financials_obj, f"get_{sheet_name}")()
+                                sheet = type("Sheet", (object,), {"data": raw_df})()
+                                sheet = sheet.data
+                            else:
+                                continue
+                            value = info_picker_2.get_file_variable(variable, sheet, year)
+                            if value is not None:
+                                break
+                        except Exception as e:
+                            print(f"[ERROR] Chyba při čtení {sheet_name} pro {company.ticker}: {e}")
+                            continue
+
                     try:
                         y = float(value) if value is not None else None
                     except ValueError:
@@ -371,4 +390,9 @@ app.layout = html.Div([
 # ----------------------------- RUN SERVER ----------------------------------
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Předcházej kolizi s MS Store stubem
+    if "WindowsApps" in sys.executable:
+        raise RuntimeError("Debugger používá python.exe z WindowsApps – nepodporováno.")
+
+    # Doporučeno: zakázat reloader, ten vytváří subprocessy
+    app.run(debug=True, use_reloader=False)
