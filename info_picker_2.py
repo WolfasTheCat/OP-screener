@@ -4,6 +4,8 @@ import uuid
 import zipfile
 import json
 import os
+from datetime import datetime
+
 import requests
 import yfinance as yf
 from typing import Dict
@@ -155,6 +157,50 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
         return None
 
     return file_path
+
+def save_yahoo_data(ticker: str, date: datetime, variables: list, data: dict):
+    directory = f"yahoo_data_json/{ticker}"
+    os.makedirs(directory, exist_ok=True)
+
+    safe_date = date.strftime("%Y-%m-%d")
+    filename = f"{ticker}_{safe_date}_{uuid.uuid4().hex[:8]}.json"
+    file_path = os.path.join(directory, filename)
+
+    try:
+        payload = {
+            "date": safe_date,
+            "variables": variables,
+            "values": data
+        }
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=4)
+        print(f"[YAHOO] Uloženo Yahoo data do {file_path}")
+    except Exception as e:
+        print(f"[ERROR] Nepodařilo se uložit Yahoo data: {e}")
+        return None
+
+    return file_path
+
+def fetch_and_store_yahoo_data(ticker: str, date: datetime, variables: list[str]):
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        hist = ticker_obj.history(start=date, end=date + pd.Timedelta(days=5)).dropna()
+        if hist.empty:
+            print(f"[YAHOO] Prázdná data pro {ticker} k {date}")
+            return None
+
+        result = {}
+        for var in variables:
+            matched = [col for col in hist.columns if var.lower() in col.lower()]
+            if matched:
+                result[var] = float(hist[matched[0]].iloc[0])
+
+        if result:
+            return save_yahoo_data(ticker, date, variables, result)
+    except Exception as e:
+        print(f"[YAHOO] Chyba při stahování Yahoo dat pro {ticker}: {e}")
+    return None
+
 
 def get_file_variable(variable, sheet_object, year):
     try:
