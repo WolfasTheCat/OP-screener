@@ -6,9 +6,17 @@ import json
 import os
 from datetime import datetime
 
+from urllib import request
+from bs4 import BeautifulSoup
+import datetime
+import dateutil.relativedelta as dr
+
+import pandas as pd
 import requests
 import yfinance as yf
 from typing import Dict
+
+from lxml.saxparser import value
 from sec_api import QueryApi, XbrlApi
 from sec_edgar_api import EdgarClient
 from edgar import *
@@ -158,50 +166,6 @@ def save_financials_as_json(financials_file, ticker, reporting_date):
 
     return file_path
 
-def save_yahoo_data(ticker: str, date: datetime, variables: list, data: dict):
-    directory = f"yahoo_data_json/{ticker}"
-    os.makedirs(directory, exist_ok=True)
-
-    safe_date = date.strftime("%Y-%m-%d")
-    filename = f"{ticker}_{safe_date}_{uuid.uuid4().hex[:8]}.json"
-    file_path = os.path.join(directory, filename)
-
-    try:
-        payload = {
-            "date": safe_date,
-            "variables": variables,
-            "values": data
-        }
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=4)
-        print(f"[YAHOO] Uloženo Yahoo data do {file_path}")
-    except Exception as e:
-        print(f"[ERROR] Nepodařilo se uložit Yahoo data: {e}")
-        return None
-
-    return file_path
-
-def fetch_and_store_yahoo_data(ticker: str, date: datetime, variables: list[str]):
-    try:
-        ticker_obj = yf.Ticker(ticker)
-        hist = ticker_obj.history(start=date, end=date + pd.Timedelta(days=5)).dropna()
-        if hist.empty:
-            print(f"[YAHOO] Prázdná data pro {ticker} k {date}")
-            return None
-
-        result = {}
-        for var in variables:
-            matched = [col for col in hist.columns if var.lower() in col.lower()]
-            if matched:
-                result[var] = float(hist[matched[0]].iloc[0])
-
-        if result:
-            return save_yahoo_data(ticker, date, variables, result)
-    except Exception as e:
-        print(f"[YAHOO] Chyba při stahování Yahoo dat pro {ticker}: {e}")
-    return None
-
-
 def get_file_variable(variable, sheet_object, year):
     try:
         df = sheet_object.data
@@ -266,7 +230,133 @@ def update_company_list():
     company_data.load_saved_companies()
     company_data.update_companies(new_data)
 
-def SecTools_export_important_data(company, existing_data, year):
+def download_SP500_tickers():
+    # URL request, URL opener, read content
+    req = request.Request('http://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+    opener = request.urlopen(req)
+    content = opener.read().decode()  # Convert bytes to UTF-8
+
+    soup = BeautifulSoup(content, features="lxml")
+    tables = soup.find_all('table')  # HTML table we actually need is tables[0]
+
+    external_class = tables[0].findAll('a', {'class': 'external text'})
+
+    tickers = []
+
+    for ext in external_class:
+        if not 'reports' in ext:
+            tickers.append(ext.string)
+
+    return tickers
+
+def extract_date_from_filename(filename: str, ticker: str) -> Optional[pd.Timestamp]:
+    """
+    Expected filename pattern: <TICKER>_YYYY-MM-DD_<anything>.json
+    Returns pandas.Timestamp if found, else None.
+    """
+    # Escape ticker for regex and capture YYYY-MM-DD between underscores
+    m = re.match(rf"^{re.escape(ticker)}_(\d{{4}}-\d{{2}}-\d{{2}})_.*\.json$", filename)
+    if not m:
+        return None
+    try:
+        return pd.to_datetime(m.group(1))
+    except Exception:
+        return None
+
+#TODO Read values from files or update them if missing -DONE --------- Apply it to main function
+def yf_get_stock_data(tickers, dates):
+    years = {pd.to_datetime(d).year for d in dates}
+    stock_data: Dict[str, Dict[str, Optional[float]]] = {}
+
+    for ticker in tickers:
+
+        json_dir = f"xbrl_data_json/{ticker}"
+        stock_data[ticker] = {}
+
+        if not os.path.isdir(json_dir):
+            print(f"[WARNING] Directory not found for {ticker}: {json_dir}")
+            continue
+
+        for file in os.listdir(json_dir):
+
+            if not (file.endswith(".json") and file.startswith(f"{ticker}_")):
+                continue
+
+            filepath = os.path.join(json_dir, file)
+            file_date = extract_date_from_filename(file, ticker)
+            if file_date is None or file_date.year not in years:
+                continue
+
+            date_key = file_date.strftime('%Y-%m-%d')
+
+            #Read JSON
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                print(f"[ERROR] Error while reading file: {e}")
+                stock_data[ticker][date_key] = None
+                continue
+
+            #Only read
+            if "yf_value" in data and data["yf_value"] is not None:
+                try:
+                    stock_data[ticker][date_key] = float(data["yf_value"])
+                except Exception:
+                    stock_data[ticker][date_key] = None
+                continue
+
+            #Missing - Download them
+
+            try:
+                price = yf_download_price(ticker=ticker, date=file_date, file_path=filepath)
+                stock_data[ticker][date_key] = price
+            except Exception as e:
+                print(f"[ERROR] Download/write failed for {ticker} {file_date.date()} ({file}): {e}")
+                stock_data[ticker][date_key] = None
+
+def yf_download_price(ticker, date, file_path):
+    # Ensure date is a pandas.Timestamp
+    if not isinstance(date, pd.Timestamp):
+        date = pd.to_datetime(date)
+
+    # Download data (Yahoo requires an interval > 0 days, so we fetch 1 day extra)
+    hist = yf.download(
+        tickers=ticker,
+        start=date,
+        end=date + pd.Timedelta(days=1),
+        progress=False
+    )
+
+    if hist.empty:
+        print(f"[WARNING] No data found for {ticker} on {date.date()}")
+        return None
+
+    # Get the close price
+    close_price = float(hist["Close"].iloc[0])
+
+    # Ensure the JSON file exists
+    if not os.path.exists(file_path):
+        print(f"[ERROR] File not found: {file_path}")
+        return None
+
+    # Load existing JSON
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Insert yf_value
+    data["yf_value"] = close_price
+
+    # Save back
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+
+    print(f"[INFO] Saved yf_value={close_price} into {file_path}")
+    return close_price
+
+
+"""Main function to check for differences and update the company list."""
+def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=False, yahoo_vars=None):
     print(f"[INFO] Zpracovávám filings pro společnost: {company.cik} ({company.ticker})")
 
     company_data = existing_data.companies.get(

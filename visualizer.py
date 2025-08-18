@@ -3,6 +3,7 @@ import json
 import sys
 from datetime import datetime
 
+import dash_bootstrap_components as dbc
 import dash
 import pandas as pd
 from dash import dcc, html, dash_table, callback_context, no_update
@@ -155,6 +156,7 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year):
                 if updated_company:
                     company.years.update(updated_company.years)
 
+        #EDGAR DATA
         for variable in selected_variables:
             x_values, y_values = [], []
             for year, filings in company.years.items():
@@ -245,6 +247,24 @@ app.index_string = '''
                 font-family: sans-serif;
                 overflow-x: hidden;
             }
+            /* === Fullscreen overlay pro dcc.Loading === */
+            .custom-loader.dash-loading > .dash-loading-overlay{
+                position: fixed;
+                inset: 0;
+                background: rgba(15,17,21,0.45) !important;
+                backdrop-filter: blur(2px);
+                z-index: 9999;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            /* Spinner velikost / efekt */
+            .custom-loader .dash-spinner{
+                width: 64px;
+                height: 64px;
+                border-width: 6px;
+                filter: drop-shadow(0 0 10px rgba(45,140,255,0.55));
+            }
         </style>
     </head>
     <body>
@@ -271,11 +291,13 @@ summary_data = summary_df.to_dict("records")
      State('variable-dropdown', 'value'),
      State('year-start-input', 'value'),
      State('year-end-input', 'value'),
-     State('filing-graph', 'figure')],
+     State('filing-graph', 'figure'),
+     State('finnhub-checkbox', 'value')],
 )
 def unified_callback(draw_clicks,
                      selected_ciks, selected_variables,
-                     start_year, end_year, current_fig
+                     start_year, end_year, current_fig,
+                     finnhub_value,
                      ):
     triggered = callback_context.triggered[0]["prop_id"].split(".")[0]
 
@@ -300,97 +322,119 @@ def unified_callback(draw_clicks,
 
 # ----------------------------- APP LAYOUT ----------------------------------
 
-app.layout = html.Div([
-    html.H1("Interaktivní vizualizace filingů", style={
-        "textAlign": "center",
-        "color": "#FFFFFF",
-        "marginBottom": "30px"
-    }),
 
+app.layout = (
     html.Div([
-        html.Div([
-            html.Label("Vyberte společnost:", style={"fontWeight": "bold", "color": "white"}),
-            dcc.Dropdown(
-                id='company-dropdown',
-                options=[{'label': f"{v.title} ({k})", 'value': k} for k, v in companies.companies.items()],
-                multi=True,
-                placeholder="Vyberte jednu či více společností"
-            ),
-        ], style={'marginBottom': '20px'}),
-
-        html.Div([
-            html.Label("Vyberte proměnné:", style={"fontWeight": "bold", "color": "white"}),
-            dcc.Dropdown(
-                id='variable-dropdown',
-                options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
-                multi=True,
-                placeholder="Vyberte jednu nebo více proměnných"
-            ),
-        ], style={'marginBottom': '20px'}),
-
-        html.Div([
-            html.Label("Rozsah let:", style={"fontWeight": "bold", "color": "white"}),
-            html.Div([
-                dcc.Input(id='year-start-input', type='number', step=1, value=YEAR_RANGE["start"],
-                          placeholder="Od roku", style={'marginRight': '20px', 'width': '100px'}),
-                dcc.Input(id='year-end-input', type='number', step=1, value=YEAR_RANGE["end"],
-                          placeholder="Do roku", style={'width': '100px'})
-            ], style={'display': 'flex', 'alignItems': 'center'}),
-        ], style={'marginBottom': '20px'}),
-
-        html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={
-            "backgroundColor": "#2D8CFF",
-            "color": "white",
-            "border": "none",
-            "padding": "10px 20px",
-            "borderRadius": "5px",
-            "cursor": "pointer",
-            "marginBottom": "20px"
-        }),
-
-        html.Div(id='error-message', style={'color': 'red', 'marginBottom': '20px'})
-    ], style={'maxWidth': '1200px', 'margin': '0 auto'}),
-
-    html.Div([
-        dcc.Graph(
-            id='filing-graph',
-            style={"width": "100%"},
-            figure=go.Figure(layout={
-                "template": "plotly_dark",
-                "paper_bgcolor": "#000000",
-                "plot_bgcolor": "#000000"
-            })
-        ),
-        html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "#FFFFFF"}),
-
-        dash_table.DataTable(
-            id='summary-table',
-            columns=summary_columns,
-            data=summary_data,
-            fixed_rows={'headers': True},
-            sort_action='native',
-            filter_action='native',
-            sort_mode="multi",
-            page_action='none',
-            style_table={
-                'maxHeight': '500px',
-                'overflowY': 'auto',
-                'overflowX': 'auto',
-                'border': '1px solid #444'
+        dcc.Loading(
+            fullscreen=True,
+            overlay_style={
+                "visibility":"visible",
+                "filter": "blur(2px)",
+                "backgroundColor": "rgba(15,17,21,0.35)",
             },
-            style_cell={'textAlign': 'left', 'padding': '5px'},
-            style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
-            style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
-        )
-    ], style={'maxWidth': '1200px', 'margin': '40px auto'})
-], style={'backgroundColor': '#1a1a1a', 'minHeight': '100vh', 'margin': '0', 'padding': '0'})
+            type="graph",
+            children=[
+                html.H1("Interaktivní vizualizace filingů", style={
+                            "textAlign": "center",
+                            "color": "#FFFFFF",
+                            "marginBottom": "30px"
+                        }),
+
+                        html.Div([
+                            html.Div([
+                                html.Label("Vyberte společnost:", style={"fontWeight": "bold", "color": "white"}),
+                                dcc.Dropdown(
+                                    id='company-dropdown',
+                                    options=[{'label': f"{v.title} ({k})", 'value': k} for k, v in companies.companies.items()],
+                                    multi=True,
+                                    placeholder="Vyberte jednu či více společností"
+                                ),
+                            ], style={'marginBottom': '20px'}),
+
+                            html.Div([
+                                html.Label("Vyberte proměnné:", style={"fontWeight": "bold", "color": "white"}),
+                                dcc.Dropdown(
+                                    id='variable-dropdown',
+                                    options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
+                                    multi=True,
+                                    placeholder="Vyberte jednu nebo více proměnných"
+                                ),
+                            ], style={'marginBottom': '20px'}),
+
+                            html.Div([
+                                html.Label("Rozsah let:", style={"fontWeight": "bold", "color": "white"}),
+                                html.Div([
+                                    dcc.Input(id='year-start-input', type='number', step=1, value=YEAR_RANGE["start"],
+                                              placeholder="Od roku", style={'marginRight': '20px', 'width': '100px'}),
+                                    dcc.Input(id='year-end-input', type='number', step=1, value=YEAR_RANGE["end"],
+                                              placeholder="Do roku", style={'marginRight': '20px','width': '100px'}),
+                                    dcc.Checklist(
+                                                id='finnhub-checkbox',
+                                                options=[{'label': 'Zahrnout data z Finnhub', 'value': 'finnhub'}],
+                                                value=[],
+                                                inputStyle={"marginRight": "5px"},
+                                                style={"color": "white"}
+                                            ),
+                                ], style={'display': 'flex', 'alignItems': 'center'}),
+                            ], style={'marginBottom': '20px'}),
+
+                            html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={
+                                "backgroundColor": "#2D8CFF",
+                                "color": "white",
+                                "border": "none",
+                                "padding": "10px 20px",
+                                "borderRadius": "5px",
+                                "cursor": "pointer",
+                                "marginBottom": "20px"
+                            }),
+
+                            html.Div(id='error-message', style={'color': 'red', 'marginBottom': '20px'})
+                        ], style={'maxWidth': '1200px', 'margin': '0 auto'}),
+
+                        html.Div([
+                            dcc.Graph(
+                                id='filing-graph',
+                                style={"width": "100%"},
+                                figure=go.Figure(layout={
+                                    "template": "plotly_dark",
+                                    "paper_bgcolor": "#000000",
+                                    "plot_bgcolor": "#000000"
+                                })
+                            ),
+                            html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "#FFFFFF"}),
+
+                            dash_table.DataTable(
+                                id='summary-table',
+                                columns=summary_columns,
+                                data=summary_data,
+                                fixed_rows={'headers': True},
+                                sort_action='native',
+                                filter_action='native',
+                                sort_mode="multi",
+                                page_action='none',
+                                style_table={
+                                    'maxHeight': '500px',
+                                    'overflowY': 'auto',
+                                    'overflowX': 'auto',
+                                    'border': '1px solid #444'
+                                },
+                                style_cell={'textAlign': 'left', 'padding': '5px'},
+                                style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
+                                style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
+                            )
+                        ], style={'maxWidth': '1200px', 'margin': '40px auto'})
+            ]
+        ),
+
+    ])
+)
 
 
 
 # ----------------------------- RUN SERVER ----------------------------------
 
 if __name__ == '__main__':
-    # Předcházej kolizi s MS Store stubem
+    # Předchází kolizi s MS Store stubem
     if "WindowsApps" in sys.executable:
         raise RuntimeError("Debugger používá python.exe z WindowsApps – nepodporováno.")
 
