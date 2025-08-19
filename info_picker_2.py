@@ -16,7 +16,6 @@ import requests
 import yfinance as yf
 from typing import Dict
 
-from lxml.saxparser import value
 from sec_api import QueryApi, XbrlApi
 from sec_edgar_api import EdgarClient
 from edgar import *
@@ -264,56 +263,55 @@ def extract_date_from_filename(filename: str, ticker: str) -> Optional[pd.Timest
         return None
 
 #TODO Read values from files or update them if missing -DONE --------- Apply it to main function
-def yf_get_stock_data(tickers, dates):
-    years = {pd.to_datetime(d).year for d in dates}
-    stock_data: Dict[str, Dict[str, Optional[float]]] = {}
+def yf_get_stock_data(ticker, start_year, end_year):
+    years = set(range(start_year, end_year + 1))
+    stock_data: Dict[str, Optional[float]] = {}
 
-    for ticker in tickers:
+    json_dir = f"xbrl_data_json/{ticker}"
 
-        json_dir = f"xbrl_data_json/{ticker}"
-        stock_data[ticker] = {}
+    if not os.path.isdir(json_dir):
+        print(f"[WARNING] Directory not found for {ticker}: {json_dir}")
+        return None
 
-        if not os.path.isdir(json_dir):
-            print(f"[WARNING] Directory not found for {ticker}: {json_dir}")
+    for file in os.listdir(json_dir):
+
+        if not (file.endswith(".json") and file.startswith(f"{ticker}_")):
             continue
 
-        for file in os.listdir(json_dir):
+        filepath = os.path.join(json_dir, file)
+        file_date = extract_date_from_filename(file, ticker)
+        if file_date is None or file_date.year not in years:
+            continue
 
-            if not (file.endswith(".json") and file.startswith(f"{ticker}_")):
-                continue
+        date_key = file_date.strftime('%Y-%m-%d')
 
-            filepath = os.path.join(json_dir, file)
-            file_date = extract_date_from_filename(file, ticker)
-            if file_date is None or file_date.year not in years:
-                continue
+        #Read JSON
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"[ERROR] Error while reading file: {e}")
+            stock_data[date_key] = None
+            continue
 
-            date_key = file_date.strftime('%Y-%m-%d')
-
-            #Read JSON
+        #Only read
+        if "yf_value" in data and data["yf_value"] is not None:
             try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception as e:
-                print(f"[ERROR] Error while reading file: {e}")
-                stock_data[ticker][date_key] = None
-                continue
+                stock_data[date_key] = float(data["yf_value"])
+                print("[DEBUG] Načtena hodnota YF value: " + str(data["yf_value"]) + " pro " +date_key)
+            except Exception:
+                stock_data[date_key] = None
+            continue
 
-            #Only read
-            if "yf_value" in data and data["yf_value"] is not None:
-                try:
-                    stock_data[ticker][date_key] = float(data["yf_value"])
-                except Exception:
-                    stock_data[ticker][date_key] = None
-                continue
+        #Missing - Download them
 
-            #Missing - Download them
-
-            try:
-                price = yf_download_price(ticker=ticker, date=file_date, file_path=filepath)
-                stock_data[ticker][date_key] = price
-            except Exception as e:
-                print(f"[ERROR] Download/write failed for {ticker} {file_date.date()} ({file}): {e}")
-                stock_data[ticker][date_key] = None
+        try:
+            price = yf_download_price(ticker=ticker, date=file_date, file_path=filepath)
+            stock_data[date_key] = price
+        except Exception as e:
+            print(f"[ERROR] Download/write failed for {ticker} {file_date.date()} ({file}): {e}")
+            stock_data[date_key] = None
+    return stock_data
 
 def yf_download_price(ticker, date, file_path):
     # Ensure date is a pandas.Timestamp
@@ -325,7 +323,8 @@ def yf_download_price(ticker, date, file_path):
         tickers=ticker,
         start=date,
         end=date + pd.Timedelta(days=1),
-        progress=False
+        progress=False,
+        auto_adjust=True
     )
 
     if hist.empty:

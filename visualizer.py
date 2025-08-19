@@ -9,8 +9,10 @@ import pandas as pd
 from dash import dcc, html, dash_table, callback_context, no_update
 from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
-import info_picker_2
+from pandas._config import dates
 
+import info_picker_2
+from helper import human_format
 
 # ----------------------------- CONSTANTS -----------------------------------
 VARIABLE_SHEETS = {
@@ -92,7 +94,7 @@ def load_summary_table():
     return df
 
 
-def generate_graph(selected_ciks, selected_variables, start_year, end_year):
+def generate_graph(selected_ciks, selected_variables, start_year, end_year, use_yahoo):
     fig = go.Figure()
     if not selected_ciks:
         fig.update_layout(title="Vyberte alespoň jednu společnost.", xaxis_title="Datum", yaxis_title="Hodnota")
@@ -199,18 +201,51 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year):
             combined = [(d, v) for d, v in zip(x_values, y_values) if v is not None]
             combined.sort(key=lambda x: x[0])
             if combined:
+
                 x_sorted, y_sorted = zip(*combined)
+
+                # --- základ tooltipu (název + datum) ---
+                custom_template = (
+                    f"{company.title} - {variable}<br>"
+                    "Datum: %{x|%Y-%m-%d}<br>"
+                    "Hodnota: %{customdata[0]}<br>"  # filing hodnota formátovaná přes human_format
+                )
+
+                # --- default customdata: jen filing hodnota jako string (K/M/B/T) ---
+                customdata = [[human_format(v)] for v in y_sorted]
+
+                # --- Yahoo data (pouze pokud use_yahoo a existuje aspoň jedna hodnota) ---
+                if use_yahoo:
+                    yahoo_map = info_picker_2.yf_get_stock_data(company.ticker, start_year, end_year) or {}
+                    yahoo_dict = {pd.to_datetime(d).date(): v for d, v in yahoo_map.items() if v is not None}
+                    yahoo_vals = [yahoo_dict.get(d.date(), None) for d in x_sorted]
+
+                    has_any_yahoo = any(v is not None for v in yahoo_vals)
+                    if has_any_yahoo:
+                        # rozšiř customdata o druhý sloupec s raw číslem pro Plotly format
+                        for row, yf in zip(customdata, yahoo_vals):
+                            row.append(None if yf is None else float(yf))
+
+                        # přidej řádek do tooltipu; indexujeme na [1]
+                        custom_template += "Yahoo stock: %{customdata[1]:.2f}$<br>"
+
+                custom_template += "<extra></extra>"
+
                 fig.add_trace(go.Scatter(
-                    x=x_sorted, y=y_sorted,
+                    x=list(x_sorted),
+                    y=list(y_sorted),
                     mode='lines+markers',
-                    name=f"{company.title} - {variable}"
+                    name=f"{company.title} - {variable}",
+                    customdata=customdata,
+                    hovertemplate=custom_template
                 ))
 
     fig.update_layout(
         title="Vývoj vybraných proměnných",
         xaxis_title="Datum filingů",
         yaxis_title="Hodnota",
-        template="plotly_dark"
+        template="plotly_dark",
+        yaxis_type="log"
     )
     return fig
 
@@ -292,12 +327,15 @@ summary_data = summary_df.to_dict("records")
      State('year-start-input', 'value'),
      State('year-end-input', 'value'),
      State('filing-graph', 'figure'),
-     State('finnhub-checkbox', 'value')],
+     State('finnhub-checkbox', 'value'),
+     State('yahoo-checkbox', 'value')
+     ],
+
 )
 def unified_callback(draw_clicks,
                      selected_ciks, selected_variables,
                      start_year, end_year, current_fig,
-                     finnhub_value,
+                     finnhub_value,yahoo_state
                      ):
     triggered = callback_context.triggered[0]["prop_id"].split(".")[0]
 
@@ -314,7 +352,13 @@ def unified_callback(draw_clicks,
         if not selected_ciks:
             return no_update, "Vyberte alespoň jednu společnost.", no_update
 
-        fig = generate_graph(selected_ciks, selected_variables, start_year, end_year)
+        # normalize checkbox state → bool
+        if isinstance(yahoo_state, list):  # např. Checklist vrací list vybraných položek
+            use_yahoo = len(yahoo_state) > 0
+        else:
+            use_yahoo = bool(yahoo_state)  # Switch/Checkbox vrací bool
+
+        fig = generate_graph(selected_ciks, selected_variables, start_year, end_year, yahoo_state)
         return fig, "", no_update
 
     return no_update, no_update, no_update
@@ -373,6 +417,13 @@ app.layout = (
                                                 options=[{'label': 'Zahrnout data z Finnhub', 'value': 'finnhub'}],
                                                 value=[],
                                                 inputStyle={"marginRight": "5px"},
+                                                style={"color": "white"}
+                                            ),
+                                    dcc.Checklist(
+                                                id='yahoo-checkbox',
+                                                options=[{'label': 'Zahrnout data z Yahoo', 'value': 'yahoo'}],
+                                                value=[],
+                                                inputStyle={"marginRight": "5px", "marginLeft": "20px"},
                                                 style={"color": "white"}
                                             ),
                                 ], style={'display': 'flex', 'alignItems': 'center'}),
