@@ -208,7 +208,7 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year, use_
                 custom_template = (
                     f"{company.title} - {variable}<br>"
                     "Datum: %{x|%Y-%m-%d}<br>"
-                    "Hodnota: %{customdata[0]}<br>"  # filing hodnota formátovaná přes human_format
+                    "Hodnota: %{customdata[0]} $<br>"  # filing hodnota formátovaná přes human_format
                 )
 
                 # --- default customdata: jen filing hodnota jako string (K/M/B/T) ---
@@ -227,7 +227,7 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year, use_
                             row.append(None if yf is None else float(yf))
 
                         # přidej řádek do tooltipu; indexujeme na [1]
-                        custom_template += "Yahoo stock: %{customdata[1]:.2f}$<br>"
+                        custom_template += "Yahoo akcie: %{customdata[1]:.2f} $<br>"
 
                 custom_template += "<extra></extra>"
 
