@@ -3,13 +3,11 @@ import json
 import sys
 from datetime import datetime
 
-import dash_bootstrap_components as dbc
 import dash
 import pandas as pd
 from dash import dcc, html, dash_table, callback_context, no_update
 from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
-from pandas._config import dates
 
 import info_picker_2
 from helper import human_format
@@ -24,10 +22,21 @@ VARIABLE_SHEETS = {
 VARIABLES = list(VARIABLE_SHEETS.keys())
 YEAR_RANGE = {"start": 2018, "end": datetime.now().year - 3}
 
+# Presets of indexes
+PRESET_SOURCES = {
+    "sp500": {
+        "label": "S&P 500",
+        "loader": info_picker_2.download_SP500_tickers
+    },
+
+}
 
 # ----------------------------- LOAD COMPANY DATA ---------------------------
 companies = info_picker_2.CompanyData()
 companies.load_saved_companies()
+
+# TICKER -> CIK
+TICKER_TO_CIK = {v.ticker.upper(): k for k, v in companies.companies.items()}
 
 
 # ----------------------------- FUNCTIONS -----------------------------------
@@ -86,9 +95,7 @@ def load_summary_table():
 
     if df.empty:
         print("[WARNING] Žádné záznamy nebyly načteny.")
-        return df  # nebo return pd.DataFrame(columns=["CIK", "Ticker", "Company", "Date", ...])
-
-    print("Sloupce v df:", df.columns)  # ladění
+        return df
 
     df.sort_values(["Company", "Date"], inplace=True)
     return df
@@ -158,7 +165,7 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year, use_
                 if updated_company:
                     company.years.update(updated_company.years)
 
-        #EDGAR DATA
+        # EDGAR DATA
         for variable in selected_variables:
             x_values, y_values = [], []
             for year, filings in company.years.items():
@@ -204,29 +211,24 @@ def generate_graph(selected_ciks, selected_variables, start_year, end_year, use_
 
                 x_sorted, y_sorted = zip(*combined)
 
-                # --- základ tooltipu (název + datum) ---
+                # --- tooltip ---
                 custom_template = (
                     f"{company.title} - {variable}<br>"
                     "Datum: %{x|%Y-%m-%d}<br>"
-                    "Hodnota: %{customdata[0]} $<br>"  # filing hodnota formátovaná přes human_format
+                    "Hodnota: %{customdata[0]} $<br>"
                 )
 
-                # --- default customdata: jen filing hodnota jako string (K/M/B/T) ---
                 customdata = [[human_format(v)] for v in y_sorted]
 
-                # --- Yahoo data (pouze pokud use_yahoo a existuje aspoň jedna hodnota) ---
+                # Yahoo price do tooltipu (volitelně)
                 if use_yahoo:
                     yahoo_map = info_picker_2.yf_get_stock_data(company.ticker, start_year, end_year) or {}
                     yahoo_dict = {pd.to_datetime(d).date(): v for d, v in yahoo_map.items() if v is not None}
                     yahoo_vals = [yahoo_dict.get(d.date(), None) for d in x_sorted]
 
-                    has_any_yahoo = any(v is not None for v in yahoo_vals)
-                    if has_any_yahoo:
-                        # rozšiř customdata o druhý sloupec s raw číslem pro Plotly format
+                    if any(v is not None for v in yahoo_vals):
                         for row, yf in zip(customdata, yahoo_vals):
                             row.append(None if yf is None else float(yf))
-
-                        # přidej řádek do tooltipu; indexujeme na [1]
                         custom_template += "Yahoo akcie: %{customdata[1]:.2f} $<br>"
 
                 custom_template += "<extra></extra>"
@@ -262,6 +264,68 @@ def filter_summary_table(n_clicks, filter_value):
         return summary_df.to_dict("records")
 
 
+# --------- Helpers: options with indexes -------------
+
+def build_company_dropdown_options():
+
+    options = []
+
+    # separator „Indexes“
+    options.append({"label": "— Indexes —", "value": "__SEP__IDX__", "disabled": True})
+
+    # preset položky (pseudo-hodnoty, začínají __IDX__)
+    for key, meta in PRESET_SOURCES.items():
+        options.append({
+            "label": meta["label"],
+            "value": f"__IDX__{key}"
+        })
+
+    # separator „All companies“
+    options.append({"label": "— All companies —", "value": "__SEP__ALL__", "disabled": True})
+
+
+    for cik, comp in companies.companies.items():
+        options.append({
+            "label": f"{comp.title} [{comp.ticker}] ({cik})",
+            "value": cik
+        })
+    return options
+
+
+def expand_selected_values(values):
+    """
+    Rozbalí pseudo hodnoty indexů (__IDX__xxx) na konkrétní seznam CIKů.
+    Zároveň nechá přímo vybrané CIKy být.
+    """
+    if not values:
+        return []
+
+    expanded = set()
+
+    for val in values:
+        if isinstance(val, str) and val.startswith("__IDX__"):
+            key = val.replace("__IDX__", "", 1)
+            preset = PRESET_SOURCES.get(key)
+            if not preset:
+                continue
+            try:
+                tickers = preset["loader"]() or []
+            except Exception as e:
+                print(f"[ERROR] loader preset '{key}': {e}")
+                tickers = []
+
+            # mapuj TICKER -> CIK (jen ty, které známe)
+            for t in tickers:
+                cik = TICKER_TO_CIK.get(str(t).upper())
+                if cik:
+                    expanded.add(cik)
+        else:
+            # běžný CIK
+            expanded.add(str(val))
+
+    return list(expanded)
+
+
 # ----------------------------- APP & CALLBACK ------------------------------
 
 app = dash.Dash(__name__)
@@ -282,7 +346,6 @@ app.index_string = '''
                 font-family: sans-serif;
                 overflow-x: hidden;
             }
-            /* === Fullscreen overlay pro dcc.Loading === */
             .custom-loader.dash-loading > .dash-loading-overlay{
                 position: fixed;
                 inset: 0;
@@ -293,7 +356,6 @@ app.index_string = '''
                 align-items: center;
                 justify-content: center;
             }
-            /* Spinner velikost / efekt */
             .custom-loader .dash-spinner{
                 width: 64px;
                 height: 64px;
@@ -328,37 +390,30 @@ summary_data = summary_df.to_dict("records")
      State('year-end-input', 'value'),
      State('filing-graph', 'figure'),
      State('finnhub-checkbox', 'value'),
-     State('yahoo-checkbox', 'value')
-     ],
-
+     State('yahoo-checkbox', 'value')]
 )
 def unified_callback(draw_clicks,
-                     selected_ciks, selected_variables,
+                     selected_values, selected_variables,
                      start_year, end_year, current_fig,
-                     finnhub_value,yahoo_state
-                     ):
+                     finnhub_value, yahoo_state):
     triggered = callback_context.triggered[0]["prop_id"].split(".")[0]
 
     if triggered == "draw-button":
-        selected_ciks = [selected_ciks] if isinstance(selected_ciks, (str, int)) else (selected_ciks or [])
+        selected_values = [selected_values] if isinstance(selected_values, (str, int)) else (selected_values or [])
         selected_variables = selected_variables or []
 
         if not (isinstance(start_year, int) and isinstance(end_year, int)):
             return no_update, "Zadejte platné roky (např. 2018 až 2022).", no_update
-
         if start_year > end_year:
             return no_update, "Počáteční rok musí být menší nebo roven koncovému roku.", no_update
 
+        selected_ciks = expand_selected_values(selected_values)
         if not selected_ciks:
-            return no_update, "Vyberte alespoň jednu společnost.", no_update
+            return no_update, "Vyberte alespoň jednu společnost nebo index.", no_update
 
-        # normalize checkbox state → bool
-        if isinstance(yahoo_state, list):  # např. Checklist vrací list vybraných položek
-            use_yahoo = len(yahoo_state) > 0
-        else:
-            use_yahoo = bool(yahoo_state)  # Switch/Checkbox vrací bool
+        use_yahoo = bool(yahoo_state and (isinstance(yahoo_state, list) and len(yahoo_state) > 0 or yahoo_state is True))
 
-        fig = generate_graph(selected_ciks, selected_variables, start_year, end_year, yahoo_state)
+        fig = generate_graph(selected_ciks, selected_variables, start_year, end_year, use_yahoo)
         return fig, "", no_update
 
     return no_update, no_update, no_update
@@ -366,128 +421,123 @@ def unified_callback(draw_clicks,
 
 # ----------------------------- APP LAYOUT ----------------------------------
 
-
 app.layout = (
     html.Div([
         dcc.Loading(
             fullscreen=True,
             overlay_style={
-                "visibility":"visible",
+                "visibility": "visible",
                 "filter": "blur(2px)",
                 "backgroundColor": "rgba(15,17,21,0.35)",
             },
             type="graph",
             children=[
                 html.H1("Interaktivní vizualizace filingů", style={
-                            "textAlign": "center",
-                            "color": "#FFFFFF",
-                            "marginBottom": "30px"
-                        }),
+                    "textAlign": "center",
+                    "color": "#FFFFFF",
+                    "marginBottom": "30px"
+                }),
 
+                html.Div([
+                    html.Div([
+                        html.Label("Vyberte společnost / index:", style={"fontWeight": "bold", "color": "white"}),
+                        dcc.Dropdown(
+                            id='company-dropdown',
+                            options=build_company_dropdown_options(),  # <-- flat options s indexy nahoře
+                            multi=True,
+                            placeholder="Vyberte jednu či více společností nebo index"
+                        ),
+                    ], style={'marginBottom': '20px'}),
+
+                    html.Div([
+                        html.Label("Vyberte proměnné:", style={"fontWeight": "bold", "color": "white"}),
+                        dcc.Dropdown(
+                            id='variable-dropdown',
+                            options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
+                            multi=True,
+                            placeholder="Vyberte jednu nebo více proměnných"
+                        ),
+                    ], style={'marginBottom': '20px'}),
+
+                    html.Div([
+                        html.Label("Rozsah let:", style={"fontWeight": "bold", "color": "white"}),
                         html.Div([
-                            html.Div([
-                                html.Label("Vyberte společnost:", style={"fontWeight": "bold", "color": "white"}),
-                                dcc.Dropdown(
-                                    id='company-dropdown',
-                                    options=[{'label': f"{v.title} ({k})", 'value': k} for k, v in companies.companies.items()],
-                                    multi=True,
-                                    placeholder="Vyberte jednu či více společností"
-                                ),
-                            ], style={'marginBottom': '20px'}),
-
-                            html.Div([
-                                html.Label("Vyberte proměnné:", style={"fontWeight": "bold", "color": "white"}),
-                                dcc.Dropdown(
-                                    id='variable-dropdown',
-                                    options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
-                                    multi=True,
-                                    placeholder="Vyberte jednu nebo více proměnných"
-                                ),
-                            ], style={'marginBottom': '20px'}),
-
-                            html.Div([
-                                html.Label("Rozsah let:", style={"fontWeight": "bold", "color": "white"}),
-                                html.Div([
-                                    dcc.Input(id='year-start-input', type='number', step=1, value=YEAR_RANGE["start"],
-                                              placeholder="Od roku", style={'marginRight': '20px', 'width': '100px'}),
-                                    dcc.Input(id='year-end-input', type='number', step=1, value=YEAR_RANGE["end"],
-                                              placeholder="Do roku", style={'marginRight': '20px','width': '100px'}),
-                                    dcc.Checklist(
-                                                id='finnhub-checkbox',
-                                                options=[{'label': 'Zahrnout data z Finnhub', 'value': 'finnhub'}],
-                                                value=[],
-                                                inputStyle={"marginRight": "5px"},
-                                                style={"color": "white"}
-                                            ),
-                                    dcc.Checklist(
-                                                id='yahoo-checkbox',
-                                                options=[{'label': 'Zahrnout data z Yahoo', 'value': 'yahoo'}],
-                                                value=[],
-                                                inputStyle={"marginRight": "5px", "marginLeft": "20px"},
-                                                style={"color": "white"}
-                                            ),
-                                ], style={'display': 'flex', 'alignItems': 'center'}),
-                            ], style={'marginBottom': '20px'}),
-
-                            html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={
-                                "backgroundColor": "#2D8CFF",
-                                "color": "white",
-                                "border": "none",
-                                "padding": "10px 20px",
-                                "borderRadius": "5px",
-                                "cursor": "pointer",
-                                "marginBottom": "20px"
-                            }),
-
-                            html.Div(id='error-message', style={'color': 'red', 'marginBottom': '20px'})
-                        ], style={'maxWidth': '1200px', 'margin': '0 auto'}),
-
-                        html.Div([
-                            dcc.Graph(
-                                id='filing-graph',
-                                style={"width": "100%"},
-                                figure=go.Figure(layout={
-                                    "template": "plotly_dark",
-                                    "paper_bgcolor": "#000000",
-                                    "plot_bgcolor": "#000000"
-                                })
+                            dcc.Input(id='year-start-input', type='number', step=1, value=YEAR_RANGE["start"],
+                                      placeholder="Od roku", style={'marginRight': '20px', 'width': '100px'}),
+                            dcc.Input(id='year-end-input', type='number', step=1, value=YEAR_RANGE["end"],
+                                      placeholder="Do roku", style={'marginRight': '20px', 'width': '100px'}),
+                            dcc.Checklist(
+                                id='finnhub-checkbox',
+                                options=[{'label': 'Zahrnout data z Finnhub', 'value': 'finnhub'}],
+                                value=[],
+                                inputStyle={"marginRight": "5px"},
+                                style={"color": "white"}
                             ),
-                            html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "#FFFFFF"}),
+                            dcc.Checklist(
+                                id='yahoo-checkbox',
+                                options=[{'label': 'Zahrnout data z Yahoo', 'value': 'yahoo'}],
+                                value=[],
+                                inputStyle={"marginRight": "5px", "marginLeft": "20px"},
+                                style={"color": "white"}
+                            ),
+                        ], style={'display': 'flex', 'alignItems': 'center'}),
+                    ], style={'marginBottom': '20px'}),
 
-                            dash_table.DataTable(
-                                id='summary-table',
-                                columns=summary_columns,
-                                data=summary_data,
-                                fixed_rows={'headers': True},
-                                sort_action='native',
-                                filter_action='native',
-                                sort_mode="multi",
-                                page_action='none',
-                                style_table={
-                                    'maxHeight': '500px',
-                                    'overflowY': 'auto',
-                                    'overflowX': 'auto',
-                                    'border': '1px solid #444'
-                                },
-                                style_cell={'textAlign': 'left', 'padding': '5px'},
-                                style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
-                                style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
-                            )
-                        ], style={'maxWidth': '1200px', 'margin': '40px auto'})
+                    html.Button("Aktualizuj období", id='draw-button', n_clicks=0, style={
+                        "backgroundColor": "#2D8CFF",
+                        "color": "white",
+                        "border": "none",
+                        "padding": "10px 20px",
+                        "borderRadius": "5px",
+                        "cursor": "pointer",
+                        "marginBottom": "20px"
+                    }),
+
+                    html.Div(id='error-message', style={'color': 'red', 'marginBottom': '20px'})
+                ], style={'maxWidth': '1200px', 'margin': '0 auto'}),
+
+                html.Div([
+                    dcc.Graph(
+                        id='filing-graph',
+                        style={"width": "100%"},
+                        figure=go.Figure(layout={
+                            "template": "plotly_dark",
+                            "paper_bgcolor": "#000000",
+                            "plot_bgcolor": "#000000"
+                        })
+                    ),
+                    html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "#FFFFFF"}),
+
+                    dash_table.DataTable(
+                        id='summary-table',
+                        columns=summary_columns,
+                        data=summary_data,
+                        fixed_rows={'headers': True},
+                        sort_action='native',
+                        filter_action='native',
+                        sort_mode="multi",
+                        page_action='none',
+                        style_table={
+                            'maxHeight': '500px',
+                            'overflowY': 'auto',
+                            'overflowX': 'auto',
+                            'border': '1px solid #444'
+                        },
+                        style_cell={'textAlign': 'left', 'padding': '5px'},
+                        style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
+                        style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
+                    )
+                ], style={'maxWidth': '1200px', 'margin': '40px auto'})
             ]
         ),
-
     ])
 )
-
 
 
 # ----------------------------- RUN SERVER ----------------------------------
 
 if __name__ == '__main__':
-    # Předchází kolizi s MS Store stubem
     if "WindowsApps" in sys.executable:
         raise RuntimeError("Debugger používá python.exe z WindowsApps – nepodporováno.")
-
-    # Doporučeno: zakázat reloader, ten vytváří subprocessy
     app.run(debug=True, use_reloader=False)
+
