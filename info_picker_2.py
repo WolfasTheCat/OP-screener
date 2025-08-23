@@ -248,6 +248,81 @@ def download_SP500_tickers():
 
     return tickers
 
+def download_DJI_tickers():
+    # URL request, URL opener, read content
+    req = request.Request('http://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average')
+    opener = request.urlopen(req)
+    content = opener.read().decode()  # Convert bytes to UTF-8
+
+    soup = BeautifulSoup(content, features="lxml")
+    tables = soup.find_all('table')  # HTML table we actually need is tables[0]
+
+    external_class = tables[2].findAll('a', {'class': 'external text'})
+
+    tickers = []
+
+    for ext in external_class:
+        if not 'reports' in ext:
+            tickers.append(ext.string)
+
+    return tickers
+
+import pandas as pd
+import yfinance as yf
+from typing import Optional, Tuple, List
+
+def yf_download_series_xy(ticker: str, start_year: int, end_year: int):
+    """
+    Download daily Close from Yahoo Finance and return (x_dates, y_values).
+    x_dates are tz-naive pd.Timestamp normalized to 00:00:00 to match filings.
+    """
+    try:
+        start = pd.Timestamp(year=start_year, month=1, day=1)
+        end = pd.Timestamp(year=end_year, month=12, day=31) + pd.Timedelta(days=1)
+
+        hist = yf.download(
+            tickers=ticker,
+            start=start,
+            end=end,
+            progress=False,
+            auto_adjust=True
+        )
+        if hist is None or hist.empty:
+            print(f"[YF][{ticker}] Empty for {start.date()}..{(end - pd.Timedelta(days=1)).date()}")
+            return None
+
+        # robust "Close" extraction for both single- and multi-index columns
+        if isinstance(hist.columns, pd.MultiIndex):
+            if ('Close', ticker) in hist.columns:
+                series = hist[('Close', ticker)]
+            elif 'Close' in hist.columns.get_level_values(0):
+                series = hist['Close'].iloc[:, 0]
+            else:
+                series = hist.iloc[:, 0]
+        else:
+            series = hist.get("Close", hist.iloc[:, 0])
+
+        series = pd.to_numeric(series, errors="coerce").dropna()
+        if series.empty:
+            print(f"[YF][{ticker}] Series empty after dropna().")
+            return None
+
+        idx = pd.to_datetime(series.index)
+        try:
+            idx = idx.tz_localize(None)
+        except Exception:
+            pass
+        idx = idx.normalize()
+        series.index = idx
+
+        print(f"[YF][{ticker}] points={len(series)}, first={series.index[0].date()}, "
+              f"last={series.index[-1].date()}, min={float(series.min()):.2f}, max={float(series.max()):.2f}")
+
+        return list(series.index), list(series.values.astype(float))
+    except Exception as e:
+        print(f"[ERROR] yf_download_series_xy failed for {ticker}: {e}")
+        return None
+
 def extract_date_from_filename(filename: str, ticker: str) -> Optional[pd.Timestamp]:
     """
     Expected filename pattern: <TICKER>_YYYY-MM-DD_<anything>.json
