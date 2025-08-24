@@ -22,7 +22,7 @@ VARIABLE_SHEETS = {
 VARIABLES = list(VARIABLE_SHEETS.keys())
 YEAR_RANGE = {"start": 2018, "end": datetime.now().year - 7}
 
-# Presets of indexes
+# Presets of indexes (keep ^SPX if you prefer; Yahoo's broad S&P symbol is ^GSPC)
 PRESET_SOURCES = {
     "sp500": {
         "label": "S&P 500",
@@ -30,11 +30,10 @@ PRESET_SOURCES = {
         "shortcut": "^SPX"
     },
     "dowjones": {
-            "label": "Dow Jones Industrial Average",
-            "loader": info_picker_2.download_DJI_tickers,
-            "shortcut": "^DJI"
-        }
-
+        "label": "Dow Jones Industrial Average",
+        "loader": info_picker_2.download_DJI_tickers,
+        "shortcut": "^DJI"
+    }
 }
 
 # ----------------------------- LOAD COMPANY DATA ---------------------------
@@ -45,8 +44,42 @@ companies.load_saved_companies()
 TICKER_TO_CIK = {v.ticker.upper(): k for k, v in companies.companies.items()}
 
 
-# ----------------------------- FUNCTIONS -----------------------------------
+# ----------------------------- HELPERS -------------------------------------
+def _to_sheet(sheet_like):
+    """
+    Normalize any input into an object with `.data` being a pandas DataFrame.
+    Works for:
+      - dict (from JSON) -> DataFrame.from_dict(...)
+      - DataFrame -> as-is
+      - object with `.data` (SEC 'Statement' object) -> use .data (dict/DF/other)
+      - fallback: try DataFrame(obj), else empty DF
+    """
+    if sheet_like is None:
+        df = pd.DataFrame()
+    elif isinstance(sheet_like, pd.DataFrame):
+        df = sheet_like
+    elif isinstance(sheet_like, dict):
+        df = pd.DataFrame.from_dict(sheet_like)
+    elif hasattr(sheet_like, "data"):
+        raw = getattr(sheet_like, "data")
+        if isinstance(raw, pd.DataFrame):
+            df = raw
+        elif isinstance(raw, dict):
+            df = pd.DataFrame.from_dict(raw)
+        else:
+            try:
+                df = pd.DataFrame(raw)
+            except Exception:
+                df = pd.DataFrame()
+    else:
+        try:
+            df = pd.DataFrame(sheet_like)
+        except Exception:
+            df = pd.DataFrame()
+    return type("Sheet", (object,), {"data": df})()
 
+
+# ----------------------------- FUNCTIONS -----------------------------------
 def load_summary_table():
     records = []
 
@@ -143,21 +176,16 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
                     try:
                         with open(filepath, 'r', encoding='utf-8') as f:
                             json_data = json.load(f)
-                        date = pd.to_datetime(json_data["date"]).normalize()  # <<< normalize
+                        date = pd.to_datetime(json_data["date"]).normalize()
                         year = date.year
                         if not (start_year <= year <= end_year):
                             continue
 
-                        def make_sheet(data_dict):
-                            # Always return an object with .data == DataFrame
-                            return type("Sheet", (object,), {
-                                "data": pd.DataFrame.from_dict(data_dict)
-                            })()
-
+                        # Wrap JSON dicts into .data DataFrames
                         financials = type("Financials", (object,), {
-                            "balance_sheet": make_sheet(json_data.get("balance_sheet", {})),
-                            "income": make_sheet(json_data.get("income", {})),
-                            "cashflow": make_sheet(json_data.get("cashflow", {}))
+                            "balance_sheet": _to_sheet(json_data.get("balance_sheet", {})),
+                            "income": _to_sheet(json_data.get("income", {})),
+                            "cashflow": _to_sheet(json_data.get("cashflow", {}))
                         })()
 
                         if year not in company.years:
@@ -170,13 +198,16 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
                     except Exception as e:
                         print(f"[ERROR] Chyba při načítání {file}: {e}")
 
-        # Fetch missing years from SEC if needed
+        # Fetch (or top-up) filings from SEC so each year has up to 4 filings
         for year in range(start_year, end_year + 1):
-            if year not in loaded_years:
-                print(f"[DEBUG] Stahuji rok {year}...")
+            current_count = len(company.years.get(year, []))
+            if current_count < 4:
+                print(f"[DEBUG] Year {year}: have {current_count} filings, fetching from SEC...")
                 updated_company = info_picker_2.SecTools_export_important_data(company, companies, year)
                 if updated_company:
                     company.years.update(updated_company.years)
+                new_count = len(company.years.get(year, []))
+                print(f"[DEBUG] Year {year}: now have {new_count} filings after fetch.")
 
         # Build traces per variable
         for variable in selected_variables:
@@ -188,18 +219,19 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
                     if not (filing.date and filing.financials):
                         continue
 
-                    # ensure normalized, tz-naive timestamp for X
-                    filing_dt = pd.to_datetime(filing.date).normalize()  # <<< normalize
+                    filing_dt = pd.to_datetime(filing.date).normalize()
                     financials_obj = filing.financials
                     value = None
 
                     for sheet_name in ["balance_sheet", "income", "cashflow"]:
                         try:
+                            # JSON path: attributes 'balance_sheet'/'income'/'cashflow' already wrapped
                             if hasattr(financials_obj, sheet_name):
-                                sheet = getattr(financials_obj, sheet_name)  # wrapper with .data
+                                sheet = _to_sheet(getattr(financials_obj, sheet_name))
+                            # Live SEC path: get_* methods return 'Statement' object with .data
                             elif hasattr(financials_obj, f"get_{sheet_name}"):
-                                raw_df = getattr(financials_obj, f"get_{sheet_name}")()
-                                sheet = type("Sheet", (object,), {"data": pd.DataFrame(raw_df)})()
+                                raw = getattr(financials_obj, f"get_{sheet_name}")()
+                                sheet = _to_sheet(raw)
                             else:
                                 continue
 
@@ -254,11 +286,13 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
     # --- Yahoo index traces on secondary axis ---
     if selected_indexes:
         for selected_index in selected_indexes:
-            x_vals, y_vals = info_picker_2.yf_download_series_xy(selected_index, start_year, end_year)
-            if not x_vals and not y_vals:
+            # Function returns tz-naive, normalized dates already
+            xy = info_picker_2.yf_download_series_xy(selected_index, start_year, end_year)
+            if not xy:
                 print(f"[WARNING] Index series empty for {selected_index}")
                 continue
 
+            x_vals, y_vals = xy
             fig.add_trace(go.Scatter(
                 x=list(x_vals),
                 y=[float(v) for v in y_vals],
@@ -269,26 +303,13 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
                 hovertemplate="Index %{fullData.name}<br>Datum: %{x|%Y-%m-%d}<br>Close: %{y:.2f} $<extra></extra>"
             ))
 
-    # layout must define y2:
-    fig.update_layout(
-        yaxis=dict(type="log"),
-        yaxis2=dict(
-            title="Index (Yahoo)",
-            overlaying="y",
-            side="right",
-            type="linear",
-            showgrid=False
-        ),
-    )
-    # unified X format:
-    fig.update_xaxes(type="date", tickformat="%Y-%m-%d")
-
-    # Final layout: unified X format, left (log) for filings, right (linear) for indices
+    # Axes + legend (legend pushed right so it won't collide with y2 label)
     fig.update_layout(
         title="Vývoj vybraných proměnných",
         xaxis_title="Datum filingů",
         yaxis_title="Hodnota (filings)",
         template="plotly_dark",
+        hovermode="x unified",
         yaxis=dict(type="log"),
         yaxis2=dict(
             title="Index (Yahoo)",
@@ -297,23 +318,17 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
             type="linear",
             showgrid=False
         ),
-        hovermode="x unified",
         legend=dict(
-            x=1.10,  # push legend a bit right from the plot area
+            x=1.10,  # move legend a bit to the right of the plotting area
             y=1,
-            xanchor="left",  # anchor left edge of legend box at that x
+            xanchor="left",
             yanchor="top",
-            bgcolor="rgba(0,0,0,0)"  # transparent background (optional)
+            bgcolor="rgba(0,0,0,0)"
         )
     )
-
-    # Force the same visible tick format on X for both traces
-    fig.update_xaxes(type="date", tickformat="%Y-%m-%d")  # <<< jednotný formát osy X
+    fig.update_xaxes(type="date", tickformat="%Y-%m-%d")
 
     return fig
-
-
-
 
 
 def filter_summary_table(n_clicks, filter_value):
@@ -329,16 +344,14 @@ def filter_summary_table(n_clicks, filter_value):
 
 
 # --------- Helpers: options with indexes -------------
-
 def build_company_dropdown_options():
     options = []
     options.append({"label": "— Indexes —", "value": "__SEP__IDX__", "disabled": True})
 
-    # preset values should be Yahoo shortcuts (e.g., ^SPX, ^DJI)
     for key, meta in PRESET_SOURCES.items():
         options.append({
             "label": meta["label"],
-            "value": meta["shortcut"]   # <<<<<< was "__IDX__{key}"
+            "value": meta["shortcut"]
         })
 
     options.append({"label": "— All companies —", "value": "__SEP__ALL__", "disabled": True})
@@ -350,6 +363,7 @@ def build_company_dropdown_options():
         })
     return options
 
+
 def expand_selected_values(values):
     """
     Expand index values (e.g., ^SPX, ^DJI) into constituent CIKs;
@@ -360,7 +374,6 @@ def expand_selected_values(values):
     expanded = set()
     for val in values:
         if isinstance(val, str) and val.startswith("^"):
-            # find matching preset by shortcut
             preset = next((m for m in PRESET_SOURCES.values() if m.get("shortcut") == val), None)
             if not preset:
                 continue
@@ -378,10 +391,7 @@ def expand_selected_values(values):
     return list(expanded)
 
 
-
-
 # ----------------------------- APP & CALLBACK ------------------------------
-
 app = dash.Dash(__name__)
 
 app.index_string = '''
@@ -408,7 +418,7 @@ app.index_string = '''
                 z-index: 9999;
                 display: flex;
                 align-items: center;
-                justify-content: center;
+                justify-content: center.
             }
             .custom-loader .dash-spinner{
                 width: 64px;
@@ -465,23 +475,25 @@ def unified_callback(draw_clicks,
         if start_year > end_year:
             return no_update, "Počáteční rok musí být menší nebo roven koncovému roku.", no_update
 
-        # Extract indexes (^GSPC, ^DJI, …) and expand to CIKs for filings
+        # Extract indexes (^SPX, ^DJI, …) and expand to CIKs for filings
         selected_indexes = extract_selected_indexes(values)
 
-        # IMPORTANT: pass the FULL selection to the expander so that
-        # - CIKs stay as-is
-        # - ^INDEX expands to constituent CIKs
+        # Pass the full selection to the expander (CIKs stay; ^INDEX expands to constituents)
         selected_ciks = expand_selected_values(values)
 
         if not selected_ciks and not selected_indexes:
             return no_update, "Vyberte alespoň jednu společnost nebo index.", no_update
 
-        use_yahoo = bool(yahoo_state and ((isinstance(yahoo_state, list) and len(yahoo_state) > 0) or yahoo_state is True))
+        use_yahoo = bool(
+            yahoo_state and (
+                (isinstance(yahoo_state, list) and len(yahoo_state) > 0) or yahoo_state is True
+            )
+        )
 
         fig = generate_graph(
             selected_ciks=selected_ciks,
             selected_variables=selected_variables,
-            selected_indexes=selected_indexes,  # <<<<<< pass caret tickers here
+            selected_indexes=selected_indexes,
             start_year=start_year,
             end_year=end_year,
             use_yahoo=use_yahoo
@@ -491,9 +503,7 @@ def unified_callback(draw_clicks,
     return no_update, no_update, no_update
 
 
-
 # ----------------------------- APP LAYOUT ----------------------------------
-
 app.layout = (
     html.Div([
         dcc.Loading(
@@ -516,7 +526,7 @@ app.layout = (
                         html.Label("Vyberte společnost / index:", style={"fontWeight": "bold", "color": "white"}),
                         dcc.Dropdown(
                             id='company-dropdown',
-                            options=build_company_dropdown_options(),  # <-- flat options s indexy nahoře
+                            options=build_company_dropdown_options(),
                             multi=True,
                             placeholder="Vyberte jednu či více společností nebo index"
                         ),
@@ -608,7 +618,6 @@ app.layout = (
 
 
 # ----------------------------- RUN SERVER ----------------------------------
-
 if __name__ == '__main__':
     if "WindowsApps" in sys.executable:
         raise RuntimeError("Debugger používá python.exe z WindowsApps – nepodporováno.")
