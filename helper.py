@@ -1,3 +1,7 @@
+import json
+import os
+from typing import List, Optional, Dict, Union, Tuple
+
 import pandas as pd
 
 
@@ -31,37 +35,206 @@ def extract_selected_indexes(values):
         return []
     return [v for v in values if isinstance(v, str) and v.startswith("^")]
 
-def DT_to_sheet(sheet_like):
+def find_variables_and_sheets_by_concepts(
+    json_file_or_dict: Union[str, dict],
+    concepts: List[str],
+    *,
+    exclude_abstract: bool = True,
+    sheet_order: Tuple[str, ...] = ("balance_sheet", "income", "cashflow")
+) -> Dict[str, Optional[Tuple[str, str]]]:
     """
-    Normalize various inputs into an object with attribute `.data` being a pandas DataFrame.
-    Handles:
-      - dict (as saved from JSON) -> DataFrame.from_dict(...)
-      - DataFrame -> as-is
-      - object with `.data` -> use it (and if it's a dict, convert to DF)
-      - last resort: try DataFrame(obj), else empty DF
-    """
-    if sheet_like is None:
-        df = pd.DataFrame()
-    elif isinstance(sheet_like, pd.DataFrame):
-        df = sheet_like
-    elif isinstance(sheet_like, dict):
-        df = pd.DataFrame.from_dict(sheet_like)
-    elif hasattr(sheet_like, "data"):
-        raw = getattr(sheet_like, "data")
-        if isinstance(raw, pd.DataFrame):
-            df = raw
-        elif isinstance(raw, dict):
-            df = pd.DataFrame.from_dict(raw)
-        else:
-            # Fallback if raw is list-like or something convertible
-            try:
-                df = pd.DataFrame(raw)
-            except Exception:
-                df = pd.DataFrame()
-    else:
-        try:
-            df = pd.DataFrame(sheet_like)
-        except Exception:
-            df = pd.DataFrame()
+    Resolve many XBRL concepts across ALL statements in a single pass.
 
-    return type("Sheet", (object,), {"data": df})()
+    Parameters
+    ----------
+    json_file_or_dict : str | dict
+        Path to the saved filing JSON or an already-loaded dict with keys
+        'balance_sheet', 'income', 'cashflow'. Each sheet is a dict-of-dicts
+        that reconstructs to a DataFrame with row labels as index and a 'concept' column.
+    concepts : list[str]
+        Concept IDs to search for (e.g., ["us-gaap:AssetsCurrent", ...]).
+        Matching is exact, case-insensitive.
+    exclude_abstract : bool
+        If True, rows whose 'concept' contains 'Abstract' are ignored.
+    sheet_order : tuple[str, ...]
+        Priority order when building the lookup and resolving duplicates.
+        First occurrence wins.
+
+    Returns
+    -------
+    dict[str, (sheet_name, variable_name) | None]
+        For each requested concept, returns a tuple:
+           (sheet_name, variable_name)
+        or None if not found in any sheet.
+
+    Notes
+    -----
+    - This is more efficient than calling a single-concept function repeatedly
+      because it parses the JSON and builds the lookup exactly once.
+    """
+
+    # --- Load JSON once ---
+    if isinstance(json_file_or_dict, str):
+        if not os.path.exists(json_file_or_dict):
+            raise FileNotFoundError(f"JSON file not found: {json_file_or_dict}")
+        with open(json_file_or_dict, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    elif isinstance(json_file_or_dict, dict):
+        data = json_file_or_dict
+    else:
+        raise TypeError("`json_file_or_dict` must be a file path (str) or a dict.")
+
+    # Normalize inputs we’ll match against
+    wanted = {str(c).strip().lower(): c for c in concepts}  # map normalized -> original
+    results: Dict[str, Optional[Tuple[str, str]]] = {c: None for c in concepts}
+
+    # Build a single-pass lookup across all sheets
+    concept_lookup: Dict[str, Tuple[str, str]] = {}
+    for sheet_key in sheet_order:
+        sheet_data = data.get(sheet_key, {})
+        if not sheet_data:
+            continue
+
+        df = pd.DataFrame.from_dict(sheet_data)
+        if df.empty or "concept" not in df.columns:
+            continue
+
+        search_df = df
+        if exclude_abstract:
+            search_df = df[~df["concept"].astype(str).str.contains("Abstract", case=False, na=False)]
+
+        # Record first occurrence only (respecting sheet_order priority)
+        for row_label, concept_val in zip(search_df.index, search_df["concept"]):
+            c_norm = str(concept_val).strip().lower()
+            if c_norm and c_norm not in concept_lookup:
+                concept_lookup[c_norm] = (sheet_key, str(row_label))
+
+    # Resolve all requested concepts using the built lookup
+    for c_norm, original in wanted.items():
+        if c_norm in concept_lookup:
+            results[original] = concept_lookup[c_norm]
+
+    return results
+
+
+def normalize_sheet_key(s: str) -> str:
+    """Map user-provided sheet string to canonical JSON key."""
+    key = s.strip().lower().replace(" ", "_").replace("-", "_")
+    if key.startswith("balance"):
+        return "balance_sheet"
+    if key.startswith("income"):
+        return "income"
+    if key.startswith("cash"):
+        return "cashflow"
+    raise ValueError(f"Unknown sheet '{s}'. Use: balance sheet | income | cashflow")
+
+def get_variables_from_json_dict(
+    json_file_or_dict: Union[str, Dict],
+    requests: Dict[str, Optional[Tuple[str, str]]],
+    *,
+    return_with_column: bool = False
+) -> Dict[str, Union[Optional[float], Tuple[Optional[float], Optional[str]]]]:
+    """
+    Extract multiple variables (possibly across different sheets) from a single JSON filing,
+    where `requests` is a dict mapping OUT_KEY -> (sheet, variable) | None.
+
+    Example of `requests` (your shape):
+        {
+          "us-gaap_CashAndCashEquivalentsAtCarryingValue": ("balance_sheet", "Cash and cash equivalents"),
+          "us-gaap_OperatingIncomeLoss": ("income", "Operating income"),
+          "us-gaap_PaymentsToAcquireAvailableForSaleSecurities": ("cashflow", "Purchases of marketable securities")
+        }
+
+    Returns a dict with the SAME KEYS as `requests`:
+      - value (float or None), or
+      - (value, column) if return_with_column=True, where column is the first non-null column (often a date).
+
+    Notes:
+    - Exact row-label match (case-insensitive). No aliases, no partial matches.
+    - Sheets accepted (flexible spelling): 'balance sheet' / 'balance_sheet' / 'income' / 'cashflow'
+    """
+
+    # --- Load JSON once ---
+    if isinstance(json_file_or_dict, str):
+        if not os.path.exists(json_file_or_dict):
+            raise FileNotFoundError(f"File not found: {json_file_or_dict}")
+        with open(json_file_or_dict, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    elif isinstance(json_file_or_dict, dict):
+        data = json_file_or_dict
+    else:
+        raise TypeError("`json_file_or_dict` must be a file path (str) or a dict")
+
+
+    default_val = (None, None) if return_with_column else None
+
+    # Collect which sheets are needed
+    needed_sheet_keys = set()
+    for pair in requests.values():
+        if pair is None:
+            continue
+        sheet, _ = pair
+        try:
+            needed_sheet_keys.add(normalize_sheet_key(sheet))
+        except ValueError:
+            # Invalid sheet label → will yield default later
+            continue
+
+    # Build DataFrames for the needed sheets once
+    sheet_dfs: Dict[str, pd.DataFrame] = {}
+    for sk in needed_sheet_keys:
+        sheet_dfs[sk] = pd.DataFrame.from_dict(data.get(sk, {}))
+
+    # Resolve each requested item
+    results: Dict[str, Union[Optional[float], Tuple[Optional[float], Optional[str]]]] = {}
+
+    for out_key, pair in requests.items():
+        # If request is None -> return default
+        if pair is None:
+            results[out_key] = default_val
+            continue
+
+        sheet, variable = pair
+
+        # Normalize + fetch DF
+        try:
+            sk = normalize_sheet_key(sheet)
+        except ValueError:
+            results[out_key] = default_val
+            continue
+
+        df = sheet_dfs.get(sk, pd.DataFrame())
+        if df.empty:
+            results[out_key] = default_val
+            continue
+
+        # Exact, case-insensitive match on row label
+        target = str(variable).strip().lower()
+        match_label = None
+        for idx in df.index:
+            if str(idx).strip().lower() == target:
+                match_label = idx
+                break
+
+        if match_label is None:
+            results[out_key] = default_val
+            continue
+
+        row = df.loc[match_label]
+        row_numeric = pd.to_numeric(row, errors="coerce")
+        mask = row_numeric.notna()
+        if not mask.any():
+            results[out_key] = default_val
+            continue
+
+        first_col = row_numeric.index[mask][0]
+        try:
+            value = float(row_numeric.loc[first_col])
+        except Exception:
+            results[out_key] = default_val
+            continue
+
+        results[out_key] = (value, str(first_col)) if return_with_column else value
+
+    return results
+
