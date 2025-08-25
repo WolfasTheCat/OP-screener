@@ -10,7 +10,7 @@ from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
 
 import info_picker_2
-from helper import human_format, get_selected_indexes, extract_selected_indexes
+from helper import human_format, extract_selected_indexes
 
 # ----------------------------- CONSTANTS -----------------------------------
 VARIABLE_SHEETS = {
@@ -79,8 +79,50 @@ def _to_sheet(sheet_like):
     return type("Sheet", (object,), {"data": df})()
 
 
+def build_table_variable_options():
+    """
+    Build dropdown options for table variables.
+    Prefer keys from VARIABLE_SHEETS (guaranteed mappable),
+    but we can also include keys present in VARIABLE_ALIASES if needed.
+    """
+    # Start with variables that have a sheet mapping (safe to extract)
+    base = list(VARIABLE_SHEETS.keys())
+
+    # Optionally extend with alias keys that also have a sheet mapping
+    alias_keys = [
+        k for k in getattr(info_picker_2, "VARIABLE_ALIASES", {}).keys()
+        if k in VARIABLE_SHEETS and k not in base
+    ]
+    final = base + alias_keys
+    return [{"label": v.title(), "value": v} for v in final]
+
+
 # ----------------------------- FUNCTIONS -----------------------------------
-def load_summary_table():
+def load_summary_table(selected_variables=None):
+    """
+    Build a summary DataFrame from saved JSON filings.
+
+    Parameters
+    ----------
+    selected_variables : list[str] | None
+        List of variable names to extract. If None or empty, falls back to the
+        default global VARIABLES. Variables that do not exist in VARIABLE_SHEETS
+        are silently skipped.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns: ['CIK', 'Ticker', 'Company', 'Date'] + selected variables.
+    """
+    # 1) Resolve which variables to use (fallback to default)
+    if not selected_variables:
+        vars_to_use = list(VARIABLES)
+    else:
+        # Keep only variables that have a mapping in VARIABLE_SHEETS
+        vars_to_use = [v for v in selected_variables if v in VARIABLE_SHEETS]
+        if not vars_to_use:
+            vars_to_use = list(VARIABLES)
+
     records = []
 
     for cik, company in companies.companies.items():
@@ -96,16 +138,30 @@ def load_summary_table():
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     data = json.load(f)
+
                 report_date = pd.to_datetime(data.get("date", None))
                 if not report_date:
                     continue
 
-                row = {"CIK": cik, "Ticker": ticker, "Company": name, "Date": report_date.strftime("%Y-%m-%d")}
-                for var in VARIABLES:
-                    sheet_data = data.get(VARIABLE_SHEETS[var], {})
+                row = {
+                    "CIK": cik,
+                    "Ticker": ticker,
+                    "Company": name,
+                    "Date": report_date.strftime("%Y-%m-%d"),
+                }
+
+                # 2) Extract only the requested variables
+                for var in vars_to_use:
+                    sheet_key = VARIABLE_SHEETS.get(var)
+                    if not sheet_key:
+                        continue
+
+                    sheet_data = data.get(sheet_key, {})
                     df = pd.DataFrame.from_dict(sheet_data)
                     value = None
+
                     if not df.empty:
+                        # a) exact match using aliases
                         for alias in info_picker_2.VARIABLE_ALIASES.get(var.lower(), [var.lower()]):
                             for row_label in df.index:
                                 if row_label.strip().lower() == alias:
@@ -113,6 +169,8 @@ def load_summary_table():
                                     break
                             if value is not None:
                                 break
+
+                        # b) partial match as fallback
                         if value is None:
                             for alias in info_picker_2.VARIABLE_ALIASES.get(var.lower(), [var.lower()]):
                                 for row_label in df.index:
@@ -121,15 +179,19 @@ def load_summary_table():
                                         break
                                 if value is not None:
                                     break
+
+                    # Cast to int if possible to improve filtering in Dash DataTable
                     try:
                         row[var] = int(value)
                     except (ValueError, TypeError):
                         row[var] = value
+
                 records.append(row)
+
             except Exception as e:
                 print(f"[ERROR] {filepath} – {e}")
 
-    columns = ["CIK", "Ticker", "Company", "Date"] + VARIABLES
+    columns = ["CIK", "Ticker", "Company", "Date"] + vars_to_use
     df = pd.DataFrame(records, columns=columns)
 
     if df.empty:
@@ -418,7 +480,7 @@ app.index_string = '''
                 z-index: 9999;
                 display: flex;
                 align-items: center;
-                justify-content: center.
+                justify-content: center;
             }
             .custom-loader .dash-spinner{
                 width: 64px;
@@ -439,14 +501,15 @@ app.index_string = '''
 </html>
 '''
 
+# Initial table (default variables)
 summary_df = load_summary_table()
 summary_columns = [{"name": col, "id": col} for col in summary_df.columns]
 summary_data = summary_df.to_dict("records")
 
 @app.callback(
+    # NOTE: we removed summary-table from outputs to avoid multiple-callback conflict
     [Output('filing-graph', 'figure'),
-     Output('error-message', 'children'),
-     Output('summary-table', 'data')],
+     Output('error-message', 'children')],
     Input('draw-button', 'n_clicks'),
     [State('company-dropdown', 'value'),
      State('variable-dropdown', 'value'),
@@ -471,18 +534,16 @@ def unified_callback(draw_clicks,
 
         # Basic year validation
         if not (isinstance(start_year, int) and isinstance(end_year, int)):
-            return no_update, "Zadejte platné roky (např. 2018 až 2022).", no_update
+            return no_update, "Zadejte platné roky (např. 2018 až 2022)."
         if start_year > end_year:
-            return no_update, "Počáteční rok musí být menší nebo roven koncovému roku.", no_update
+            return no_update, "Počáteční rok musí být menší nebo roven koncovému roku."
 
         # Extract indexes (^SPX, ^DJI, …) and expand to CIKs for filings
         selected_indexes = extract_selected_indexes(values)
-
-        # Pass the full selection to the expander (CIKs stay; ^INDEX expands to constituents)
         selected_ciks = expand_selected_values(values)
 
         if not selected_ciks and not selected_indexes:
-            return no_update, "Vyberte alespoň jednu společnost nebo index.", no_update
+            return no_update, "Vyberte alespoň jednu společnost nebo index."
 
         use_yahoo = bool(
             yahoo_state and (
@@ -498,9 +559,9 @@ def unified_callback(draw_clicks,
             end_year=end_year,
             use_yahoo=use_yahoo
         )
-        return fig, "", no_update
+        return fig, ""
 
-    return no_update, no_update, no_update
+    return no_update, no_update
 
 
 # ----------------------------- APP LAYOUT ----------------------------------
@@ -533,7 +594,7 @@ app.layout = (
                     ], style={'marginBottom': '20px'}),
 
                     html.Div([
-                        html.Label("Vyberte proměnné:", style={"fontWeight": "bold", "color": "white"}),
+                        html.Label("Vyberte proměnné (graf):", style={"fontWeight": "bold", "color": "white"}),
                         dcc.Dropdown(
                             id='variable-dropdown',
                             options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
@@ -591,6 +652,33 @@ app.layout = (
                     ),
                     html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "#FFFFFF"}),
 
+                    # --- Table controls ---
+                    html.Div([
+                        html.Label("Vyberte proměnné (tabulka):", style={"fontWeight": "bold", "color": "white"}),
+                        dcc.Dropdown(
+                            id='table-variables-dropdown',
+                            options=build_table_variable_options(),
+                            multi=True,
+                            placeholder="Vyberte jednu či více proměnných pro tabulku"
+                        ),
+                    ], style={'marginBottom': '10px'}),
+
+                    # New button to apply selection to the table
+                    html.Button(
+                        "Aktualizuj tabulku",
+                        id='update-table-button',
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": "#2D8CFF",
+                            "color": "white",
+                            "border": "none",
+                            "padding": "8px 16px",
+                            "borderRadius": "5px",
+                            "cursor": "pointer",
+                            "marginBottom": "16px"
+                        }
+                    ),
+
                     dash_table.DataTable(
                         id='summary-table',
                         columns=summary_columns,
@@ -615,6 +703,39 @@ app.layout = (
         ),
     ])
 )
+
+
+# ----------------------------- TABLE CALLBACK ------------------------------
+@app.callback(
+    [Output('summary-table', 'columns'),
+     Output('summary-table', 'data')],
+    Input('update-table-button', 'n_clicks'),
+    State('table-variables-dropdown', 'value')
+)
+def update_summary_table(n_clicks, selected_vars):
+    """
+    When the user clicks the button, rebuild the summary table for the selected variables.
+    - If nothing is selected, fall back to the default VARIABLES.
+    - Recompute via load_summary_table(selected_vars) to ensure columns exist.
+    """
+    # Normalize selection (allow empty -> default)
+    if not selected_vars:
+        selected_vars = list(VARIABLES)
+
+    # Build a fresh DF with exactly those variables
+    df = load_summary_table(selected_vars)
+
+    # Columns config: keep base columns as-is; title-case for variable columns
+    base_cols = ["CIK", "Ticker", "Company", "Date"]
+    columns = []
+    for col in df.columns:
+        if col in base_cols:
+            columns.append({"name": col, "id": col})
+        else:
+            columns.append({"name": col.title(), "id": col})
+
+    data = df.to_dict("records")
+    return columns, data
 
 
 # ----------------------------- RUN SERVER ----------------------------------

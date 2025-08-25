@@ -25,13 +25,6 @@ def human_format(num: float) -> str:
     else:
         return f"{num:.2f}"
 
-def get_selected_indexes(tickers):
-    index_list = []
-    for ticker in tickers:
-        if isinstance(ticker, str) and ticker.startswith("^"):
-            index_list.append(ticker)
-    return index_list
-
 def extract_selected_indexes(values):
     """Return a list of Yahoo shortcuts (e.g., ^GSPC, ^DJI) from the dropdown selection."""
     if not values:
