@@ -14,16 +14,32 @@ import info_picker_2
 from helper import human_format, extract_selected_indexes
 
 # ----------------------------- CONSTANTS -----------------------------------
+# GAAP/base variables only (mapped to us-gaap codes)
 MAPPING_VARIABLE: Dict[str, str] = {
     "Total assets": "us-gaap_Assets",
     "Total liabilities": "us-gaap_Liabilities",
     "Cash": "us-gaap_CashAndCashEquivalentsAtCarryingValue",
     "Net income": "us-gaap_NetIncomeLoss",
     "Total shareholders’ equity": "us-gaap_StockholdersEquity",
-    "P/E": "P/E",
-    "ROE": "ROE",
+    "Shares diluted": "us-gaap_EarningsPerShareDiluted",
+    "Shares basic": "us-gaap_EarningsPerShareBasic",
 }
-VARIABLES: List[str] = list(MAPPING_VARIABLE.keys())
+
+# Computed-only variables (never stored in 'base', only in 'computed')
+RATIO_VARIABLES: List[str] = [
+    "ROE",
+    "P/E",
+    "P/FCF"
+]
+
+# Special variables (neither GAAP nor ratio) read directly from JSON
+SPECIAL_VARIABLES: List[str] = [
+    "Stock value",  # reads json["yf_value"]
+]
+
+# Combined for UI dropdowns
+VARIABLES: List[str] = list(MAPPING_VARIABLE.keys()) + RATIO_VARIABLES + SPECIAL_VARIABLES
+
 YEAR_RANGE = {"start": 2018, "end": datetime.now().year - 7}
 
 PRESET_SOURCES = {
@@ -74,9 +90,9 @@ def _to_sheet(sheet_like):
 
 
 def build_table_variable_options():
-    """Options for the summary table variable picker."""
-    final = list(MAPPING_VARIABLE.keys())
-    return [{"label": v.title(), "value": v} for v in final]
+    """Options for the summary table variable picker (base + ratios + specials)."""
+    final = list(MAPPING_VARIABLE.keys()) + RATIO_VARIABLES + SPECIAL_VARIABLES
+    return [{"label": v, "value": v} for v in final]
 
 
 def _read_json(filepath: str) -> Optional[dict]:
@@ -90,21 +106,39 @@ def _read_json(filepath: str) -> Optional[dict]:
 
 def extract_from_base_or_computed(json_dict: dict, human_variable: str) -> Optional[float]:
     """
-    Read a variable from JSON 'base'/'computed'. For mapped variables we read base[us-gaap_*].
+    Read a variable from JSON 'base'/'computed' or (for specials) from top-level JSON.
+    - GAAP variables: read base[us-gaap_*] using MAPPING_VARIABLE.
+    - Ratios (ROE, P/E): read from computed[<ratio>].
+    - Special "Stock value": read json["yf_value"].
     """
     if not isinstance(json_dict, dict):
         return None
     base = json_dict.get("base", {}) or {}
     computed = json_dict.get("computed", {}) or {}
 
+    # Ratios → computed only
+    if human_variable in RATIO_VARIABLES:
+        val = computed.get(human_variable)
+        try:
+            return float(val) if val is not None else None
+        except Exception:
+            return None
+
+    # Specials
+    if human_variable == "Stock value":
+        try:
+            val = json_dict.get("yf_value")
+            return float(val) if val is not None else None
+        except Exception:
+            return None
+
+    # GAAP variables → base via code
     code = MAPPING_VARIABLE.get(human_variable)
     if code and code in base:
-        try: return float(base[code])
-        except Exception: return None
-
-    if human_variable in computed:
-        try: return float(computed[human_variable])
-        except Exception: return None
+        try:
+            return float(base[code])
+        except Exception:
+            return None
 
     return None
 
@@ -114,7 +148,10 @@ def load_summary_table(selected_variables=None):
     if not selected_variables:
         vars_to_use = list(VARIABLES)
     else:
-        vars_to_use = [v for v in selected_variables if v in MAPPING_VARIABLE]
+        # allow GAAP-mapped, ratios, and specials
+        vars_to_use = [v for v in selected_variables if (
+            v in MAPPING_VARIABLE or v in RATIO_VARIABLES or v in SPECIAL_VARIABLES
+        )]
         if not vars_to_use:
             vars_to_use = list(VARIABLES)
 
@@ -192,7 +229,7 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
                     if start_year <= dt.year <= end_year:
                         filings_loaded.append((dt, data))
 
-        # ensure SEC fetch if too few filings per year (optional, keeps your original behavior)
+        # Optionally ensure SEC fetch if too few filings per year
         for year in range(start_year, end_year + 1):
             # skip if we already have >=4 items that year
             if sum(1 for d, _ in filings_loaded if d.year == year) < 4:
@@ -215,15 +252,25 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
         for human_var in selected_variables:
             xs, ys, customdata = [], [], []
 
-            # us-gaap code (for base lookup)
+            is_ratio = human_var in RATIO_VARIABLES
+            is_special_stock = (human_var == "Stock value")
             code = MAPPING_VARIABLE.get(human_var, human_var)
 
             for filing_dt, json_data in filings_loaded:
-                try:
-                    value = info_picker_2.get_file_variable(code, json_data, year=filing_dt.year)
-                except Exception as e:
-                    print(f"[ERROR] get_file_variable({code}) failed for {company.ticker}: {e}")
-                    value = None
+                if is_ratio:
+                    # Read from computed
+                    comp = (json_data.get("computed") or {})
+                    value = comp.get(human_var)
+                elif is_special_stock:
+                    # Read saved Yahoo price directly from JSON
+                    value = json_data.get("yf_value")
+                else:
+                    # GAAP variable: use helper to extract from base sheets
+                    try:
+                        value = info_picker_2.get_file_variable(code, json_data, year=filing_dt.year)
+                    except Exception as e:
+                        print(f"[ERROR] get_file_variable({code}) failed for {company.ticker}: {e}")
+                        value = None
 
                 y_num = None
                 try:
@@ -234,7 +281,15 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
                 xs.append(filing_dt)
                 ys.append(y_num)
 
-                row = [human_format(y_num) if y_num is not None else None]
+                pretty_val = None
+                if y_num is not None:
+                    if is_ratio:
+                        pretty_val = f"{y_num:.2f}"
+                    elif is_special_stock:
+                        pretty_val = f"{y_num:.2f} $"
+                    else:
+                        pretty_val = human_format(y_num)
+                row = [pretty_val]
                 customdata.append(row)
 
             # sort & filter out None
@@ -250,13 +305,12 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
                 "Value: %{customdata[0]}<br>"
             )
 
-            # Attach Yahoo price per filing date if requested
-            if use_yahoo:
+            # Attach Yahoo price per filing date (skip duplication if we're already plotting Stock value)
+            if use_yahoo and human_var != "Stock value":
                 yf_map = info_picker_2.yf_get_stock_data(company.ticker, start_year, end_year) or {}
                 yf_by_date = {pd.to_datetime(d).date(): v for d, v in yf_map.items() if v is not None}
-                # extend customdata with yf price
-                new_cd = []
-                has_any = False
+
+                new_cd, has_any = [], False
                 for d, row in zip(x_sorted, cd_sorted):
                     v = yf_by_date.get(d.date())
                     row = list(row)
@@ -339,6 +393,22 @@ def build_company_dropdown_options():
         options.append({"label": f"{comp.title} [{comp.ticker}] ({cik})", "value": cik})
     return options
 
+def build_variable_dropdown_options():
+    """Group dropdown for the graph/table: base (human names), computed, specials."""
+    options = []
+    options.append({"label": "— Base variables —", "value": "__SEP__BASE__", "disabled": True})
+    for key in MAPPING_VARIABLE.keys():
+        options.append({"label": key, "value": key})  # value = human label
+
+    options.append({"label": "— Computed variables —", "value": "__SEP__COM__", "disabled": True})
+    for key in RATIO_VARIABLES:
+        options.append({"label": key, "value": key})
+
+    options.append({"label": "— Special variables —", "value": "__SEP__SPE__", "disabled": True})
+    for key in SPECIAL_VARIABLES:
+        options.append({"label": key, "value": key})
+    return options
+
 
 def expand_selected_values(values):
     """
@@ -396,7 +466,7 @@ app.index_string = '''
                 z-index: 9999;
                 display: flex;
                 align-items: center;
-                justify-content: center;
+                justify-content: center.
             }
             .custom-loader .dash-spinner{
                 width: 64px;
@@ -445,6 +515,8 @@ def unified_callback(draw_clicks,
         if not isinstance(values, list):
             values = [values]
         selected_variables = selected_variables or []
+        # drop group separators in the variables selector
+        selected_variables = [v for v in selected_variables if v not in {"__SEP__BASE__", "__SEP__COM__", "__SEP__SPE__"}]
 
         if not (isinstance(start_year, int) and isinstance(end_year, int)):
             return no_update, "Zadejte platné roky (např. 2018 až 2022)."
@@ -505,7 +577,7 @@ app.layout = (
                         html.Label("Vyberte proměnné (graf):", style={"fontWeight": "bold", "color": "white"}),
                         dcc.Dropdown(
                             id='variable-dropdown',
-                            options=[{'label': k.title(), 'value': k} for k in MAPPING_VARIABLE.keys()],
+                            options=build_variable_dropdown_options(),
                             multi=True,
                             placeholder="Vyberte jednu nebo více proměnných"
                         ),
@@ -621,6 +693,8 @@ app.layout = (
 def update_summary_table(n_clicks, selected_vars):
     if not selected_vars:
         selected_vars = list(VARIABLES)
+    else:
+        selected_vars = [v for v in selected_vars if v not in {"__SEP__BASE__", "__SEP__COM__", "__SEP__SPE__"}]
 
     df = load_summary_table(selected_vars)
 
@@ -630,7 +704,11 @@ def update_summary_table(n_clicks, selected_vars):
         if col in base_cols:
             columns.append({"name": col, "id": col})
         else:
-            columns.append({"name": col.title(), "id": col})
+            # Keep acronyms as-is; others title-case
+            if col in RATIO_VARIABLES or col in SPECIAL_VARIABLES:
+                columns.append({"name": col, "id": col})
+            else:
+                columns.append({"name": col.title(), "id": col})
 
     data = df.to_dict("records")
     return columns, data

@@ -147,11 +147,14 @@ def save_financials_as_json(
     reporting_date: datetime,
     *,
     out_dir: str = "xbrl_data_json",
-    variable_mapping: dict | None = None
+    variable_mapping: dict | None = None,
+    yf_value: Optional[float] = None,
+    yf_value_date: Optional[str] = None,
 ) -> str:
     """
     Serialize parsed financial statements into a JSON file.
     Optionally computes 'base' and 'computed' ratios using `variable_mapping`.
+    If `yf_value` is provided, it is stored and also used to compute ratios (e.g., P/E).
     """
     try:
         safe_date = reporting_date.strftime("%Y-%m-%d")
@@ -177,8 +180,15 @@ def save_financials_as_json(
             "ticker": ticker
         }
 
+        # Store Yahoo price if provided
+        if yf_value is not None:
+            data["yf_value"] = float(yf_value)
+            if yf_value_date:
+                data["yf_value_date"] = str(yf_value_date)
+
+        # Compute ratios with optional stock price
         if variable_mapping:
-            ratios = compute_ratios(data, variable_mapping)
+            ratios = compute_ratios(data, variable_mapping, stock_price=yf_value)
             data.update(ratios)
 
         with open(file_path, "w", encoding="utf-8") as f:
@@ -682,6 +692,69 @@ def yf_download_price(ticker, date, file_path, window_days: int = 3):
     return price
 
 
+def _yf_fetch_price_value_only(ticker: str, date: Union[str, pd.Timestamp, datetime], window_days: int = 3) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Fetch the Close nearest to `date` within ±window_days, but DO NOT persist.
+    Returns (price, picked_date_str) or (None, None).
+    """
+    date = pd.to_datetime(date)
+    try:
+        date = date.tz_localize(None)
+    except Exception:
+        pass
+    date = date.normalize()
+
+    start_w = date - pd.Timedelta(days=window_days)
+    end_w   = date + pd.Timedelta(days=window_days + 1)
+
+    try:
+        hist = yf.download(
+            tickers=ticker,
+            start=start_w,
+            end=end_w,
+            progress=False,
+            auto_adjust=True,
+            threads=False
+        )
+    except Exception as e:
+        print(f"[ERROR] _yf_fetch_price_value_only failed for {ticker}: {e}")
+        return None, None
+
+    if hist is None or hist.empty:
+        return None, None
+
+    if isinstance(hist.columns, pd.MultiIndex):
+        if ('Close', ticker) in hist.columns:
+            close = hist[('Close', ticker)]
+        elif 'Close' in hist.columns.get_level_values(0):
+            close = hist['Close'].iloc[:, 0]
+        else:
+            close = hist.iloc[:, 0]
+    else:
+        close = hist.get("Close", hist.iloc[:, 0])
+
+    close = pd.to_numeric(close, errors="coerce").dropna()
+    if close.empty:
+        return None, None
+
+    idx = pd.to_datetime(close.index)
+    try:
+        idx = idx.tz_localize(None)
+    except Exception:
+        pass
+    idx = idx.normalize()
+    close.index = idx
+
+    td = close.index - date
+    td_ns = td.view('i8')
+    td_abs = np.abs(td_ns)
+    pos = int(np.argmin(td_abs))
+
+    picked_date = close.index[pos].strftime("%Y-%m-%d")
+    price = float(close.iloc[pos])
+    return price, picked_date
+
+
 # ----------------------------- SEC FETCH ------------------------------------
 def _get_reporting_date(filing) -> Optional[pd.Timestamp]:
     """Try to obtain the report (period-end) date from a filing object."""
@@ -702,6 +775,11 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
     """
     Fetch 10-Q / 10-K around a given calendar year but *store and bucket* by the report date
     (period end).
+
+    NEW: For each saved filing we now:
+      1) Fetch Yahoo close near the report date (±3 days, value-only).
+      2) Pass that price to `save_financials_as_json` → stored as `yf_value`
+         and used immediately by `compute_ratios` (e.g., P/E).
     """
     print(f"[INFO] Zpracovávám filings pro společnost: {company.cik} ({company.ticker})")
 
@@ -764,7 +842,17 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
                 company_data.years[year].append(CompanyFinancials(report_dt, file_financials, location=None))
             continue
 
-        file_path = save_financials_as_json(file_financials, company.ticker, report_dt, variable_mapping=mapping_variables)
+        # === NEW: fetch Yahoo price BEFORE saving JSON so ratios can use it immediately ===
+        yf_price, yf_price_date = _yf_fetch_price_value_only(company.ticker, report_dt, window_days=3)
+
+        file_path = save_financials_as_json(
+            file_financials,
+            company.ticker,
+            report_dt,
+            variable_mapping=mapping_variables,
+            yf_value=yf_price,
+            yf_value_date=yf_price_date
+        )
         if not file_path:
             print("[ERROR] Nepodařilo se uložit JSON.")
             continue
@@ -779,7 +867,8 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
                 CompanyFinancials(report_dt, file_financials, location=file_path, json_data=None)
             )
             print(f"[INFO] Uloženo: {company.ticker} – report {safe_report_date} "
-                  f"(filed {getattr(filing, 'filing_date', 'N/A')})")
+                  f"(filed {getattr(filing, 'filing_date', 'N/A')}); "
+                  f"yf_value={yf_price if yf_price is not None else 'None'} (date={yf_price_date})")
 
     return company_data
 
