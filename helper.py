@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List, Optional, Dict, Union, Tuple
+from typing import List, Optional, Dict, Union, Tuple, Any
 
 import pandas as pd
 
@@ -28,6 +28,30 @@ def human_format(num: float) -> str:
         return f"{num/1e3:.2f}K"
     else:
         return f"{num:.2f}"
+
+def _to_float(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        s = str(x).replace(",", "").strip()
+        if s == "":
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+def safe_div(num: Optional[float], den: Optional[float]) -> Optional[float]:
+    if num is None or den is None or den == 0:
+        return None
+    return num / den
+
+def first_numeric(variables: Dict[str, Any], keys: list[str]) -> Optional[float]:
+    for k in keys:
+        if k in variables:
+            v = _to_float(variables.get(k))
+            if v is not None:
+                return v
+    return None
 
 def extract_selected_indexes(values):
     """Return a list of Yahoo shortcuts (e.g., ^GSPC, ^DJI) from the dropdown selection."""

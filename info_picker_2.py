@@ -1,10 +1,11 @@
-import io
+from io import StringIO, BytesIO
 import uuid
 import zipfile
 import json
 import os
 import re
-from urllib import request
+import time
+from urllib import request as urllib_request
 
 import numpy as np
 from bs4 import BeautifulSoup
@@ -12,19 +13,27 @@ from datetime import datetime, timedelta
 import pandas as pd
 import requests
 import yfinance as yf
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Union
 from edgar import *
 from indicators import compute_ratios
 
-# File path for storing the company list
+# ----------------------------- CONSTANTS ------------------------------------
+
 FILE_PATH = "company_tickers.json"
 
-# Headers for SEC API requests
 HEADERS = {
-    'User-Agent': 'EdgarAnalytic/0.1 (AlfredNem@gmail.com)'
+    # Use a realistic desktop UA – many sites (incl. Wikipedia) block default Python UAs.
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
 }
 
-# Aliases to locate variables in XBRL tables
+# Aliases to locate variables in XBRL tables (kept for fallback-only)
 VARIABLE_ALIASES = {
     "total assets": ["total assets", "assets"],
     "total liabilities": ["total liabilities", "liabilities"],
@@ -39,6 +48,11 @@ VARIABLE_SHEETS = {
     "Shares Outstanding": "income"
 }
 
+# Cache for index tickers (seconds)
+INDEX_CACHE_SECONDS = 24 * 3600
+CACHE_DIR = ".cache_index_lists"
+os.makedirs(CACHE_DIR, exist_ok=True)
+
 
 # ----------------------------- DATA CLASSES ---------------------------------
 class CompanyIns:
@@ -50,10 +64,11 @@ class CompanyIns:
 
 
 class CompanyFinancials:
-    def __init__(self, date, filling, location=None):
+    def __init__(self, date, filling, location=None, json_data: Optional[dict] = None):
         self.date = date                    # report date (period end)
         self.financials = filling           # edgar.Financials or a wrapper
         self.location = location            # path to saved JSON snapshot
+        self.json_data = json_data          # cached JSON dict (if available)
 
 
 class CompanyData:
@@ -126,80 +141,153 @@ def save_xbrl_to_disk(xbrl_data, ticker, reporting_date):
     return file_path
 
 
-def save_financials_as_json(financials_file, ticker, reporting_date):
+def save_financials_as_json(
+    financials_file,
+    ticker: str,
+    reporting_date: datetime,
+    *,
+    out_dir: str = "xbrl_data_json",
+    variable_mapping: dict | None = None
+) -> str:
     """
-    Saves the three statements to JSON (dict-of-dicts) and computes 'computed' section.
-    The filename is keyed by the *reporting (period-end) date*.
+    Serialize parsed financial statements into a JSON file.
+    Optionally computes 'base' and 'computed' ratios using `variable_mapping`.
     """
-    directory = f"xbrl_data_json/{ticker}"
-    os.makedirs(directory, exist_ok=True)
+    try:
+        safe_date = reporting_date.strftime("%Y-%m-%d")
+    except Exception:
+        try:
+            safe_date = str(reporting_date)
+        except Exception:
+            safe_date = "unknown-date"
 
-    safe_date = reporting_date.strftime("%Y-%m-%d")
-    filename = f"{ticker}_{safe_date}_{uuid.uuid4().hex[:8]}.json"
-    file_path = os.path.join(directory, filename)
+    os.makedirs(os.path.join(out_dir, ticker), exist_ok=True)
+    file_path = os.path.join(out_dir, ticker, f"{ticker}_{safe_date}.json")
 
     try:
+        balance_sheet_df = financials_file.get_balance_sheet().data
+        income_df = financials_file.get_income_statement().data
+        cashflow_df = financials_file.get_cash_flow_statement().data
+
         data = {
-            "balance_sheet": financials_file.get_balance_sheet().data.to_dict(),
-            "income": financials_file.get_income_statement().data.to_dict(),
-            "cashflow": financials_file.get_cash_flow_statement().data.to_dict(),
-            "date": safe_date
+            "balance_sheet": balance_sheet_df.to_dict(),
+            "income": income_df.to_dict(),
+            "cashflow": cashflow_df.to_dict(),
+            "date": safe_date,
+            "ticker": ticker
         }
-        computed = compute_ratios(data["balance_sheet"], data["income"], data["cashflow"])
-        data["computed"] = computed
+
+        if variable_mapping:
+            ratios = compute_ratios(data, variable_mapping)
+            data.update(ratios)
+
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"Error saving financials JSON: {e}")
-        return None
 
-    return file_path
+        return file_path
+
+    except Exception as e:
+        print(f"[ERROR] save_financials_as_json failed for {ticker} {safe_date}: {e}")
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+        except Exception:
+            pass
+        return file_path
 
 
 # ----------------------------- VARIABLE EXTRACT -----------------------------
-def get_file_variable(variable, sheet_object, year):
-    """
-    Finds a variable in a 'Sheet' object (which must expose .data -> DataFrame).
-    Prefers exact match; falls back to partial match. Skips abstract concepts.
-    """
-    try:
-        df = sheet_object.data
+def _load_json_any(file_or_json: Union[str, dict, None]) -> Optional[dict]:
+    """Load JSON dict from a filepath or return the dict if already provided."""
+    if file_or_json is None:
+        return None
+    if isinstance(file_or_json, dict):
+        return file_or_json
+    if isinstance(file_or_json, str):
+        try:
+            with open(file_or_json, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[ERROR] Failed to read JSON '{file_or_json}': {e}")
+            return None
+    return None
 
-        if df.empty:
-            print(f"[WARNING] DataFrame je prázdný pro rok {year}.")
+
+def get_file_variable(variable_key: str, file_or_json: Union[str, dict, None], year: Optional[int] = None):
+    """
+    Prefer values from JSON sections 'base' / 'computed'.
+    - If `variable_key` starts with 'us-gaap' → search in base[variable_key]
+    - Otherwise → search in computed[variable_key]
+    Falls back to legacy .data scanning only if JSON is not available.
+    """
+    data = _load_json_any(file_or_json)
+
+    key = variable_key.strip()
+    # Preferred path: JSON with 'base'/'computed'
+    if isinstance(data, dict) and ("base" in data or "computed" in data):
+        is_usgaap = key.lower().startswith("us-gaap")
+        section = "base" if is_usgaap else "computed"
+        bucket = data.get(section, {})
+
+        if key in bucket:
+            try:
+                return float(bucket[key])
+            except Exception:
+                return bucket[key]
+
+        other = "computed" if section == "base" else "base"
+        if key in data.get(other, {}):
+            try:
+                return float(data[other][key])
+            except Exception:
+                return data[other][key]
+
+        print(f"[DEBUG] Key '{key}' not present in '{section}' nor '{other}'.")
+        return None
+
+    # Fallback: try object with .data (kept for backward compatibility)
+    try:
+        df = getattr(file_or_json, "data", None)
+        if df is None:
+            if data is None:
+                print("[WARNING] No JSON nor .data DataFrame available; cannot resolve variable.")
             return None
 
-        # If 'concept' column exists, filter out Abstract rows
-        if "concept" in df.columns:
-            df = df[~df["concept"].str.contains("Abstract", case=False, na=False)]
+        if df.empty:
+            print(f"[WARNING] DataFrame is empty for year {year}.")
+            return None
 
-        # Normalize query
-        var_norm = variable.strip().lower()
+        var_norm = key.lower()
+        try:
+            candidate_labels = VARIABLE_ALIASES.get(var_norm, [var_norm])
+        except NameError:
+            candidate_labels = [var_norm]
 
-        # Candidate aliases
-        candidate_labels = VARIABLE_ALIASES.get(var_norm, [var_norm])
-
-        # 1) Exact match (case-insensitive)
+        # exact
         for name in candidate_labels:
             for row_label in df.index:
-                if row_label.strip().lower() == name:
+                if str(row_label).strip().lower() == name:
                     value = df.loc[row_label].dropna().iloc[0]
-                    print(f"[DEBUG] Načteno: přesná shoda '{row_label}' → {value}")
-                    return value
+                    try:
+                        return float(value)
+                    except Exception:
+                        return value
 
-        # 2) Partial match
+        # partial
         for name in candidate_labels:
             for row_label in df.index:
-                if name in row_label.strip().lower():
+                if name in str(row_label).strip().lower():
                     value = df.loc[row_label].dropna().iloc[0]
-                    print(f"[DEBUG] Načteno: částečná shoda '{row_label}' → {value}")
-                    return value
+                    try:
+                        return float(value)
+                    except Exception:
+                        return value
 
-        print(f"[DEBUG] Proměnná '{variable}' nebyla nalezena v žádné podobě.")
+        print(f"[DEBUG] (fallback) Variable '{variable_key}' not found.")
         return None
 
     except Exception as e:
-        print(f"[ERROR] Error while extracting variable: {e}")
+        print(f"[ERROR] Error while extracting variable (fallback): {e}")
         return None
 
 
@@ -207,8 +295,7 @@ def get_file_variable(variable, sheet_object, year):
 def download_company_tickers():
     """Fetch the latest company tickers list from SEC."""
     url = "https://www.sec.gov/files/company_tickers.json"
-    response = requests.get(url, headers=HEADERS)
-
+    response = requests.get(url, headers={"User-Agent": "EdgarAnalytic/0.1 (contact@example.com)"})
     if response.status_code == 200:
         return response.json()
     else:
@@ -227,32 +314,168 @@ def update_company_list():
 
 
 # ----------------------------- INDEX HELPERS --------------------------------
-def download_SP500_tickers():
-    req = request.Request('http://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
-    opener = request.urlopen(req)
-    content = opener.read().decode()
-    soup = BeautifulSoup(content, features="lxml")
-    tables = soup.find_all('table')  # the table we actually need is tables[0]
-    external_class = tables[0].findAll('a', {'class': 'external text'})
-    tickers = []
-    for ext in external_class:
-        if 'reports' not in str(ext):
-            tickers.append(ext.string)
-    return tickers
+def _load_cached_list(cache_name: str) -> Optional[List[str]]:
+    """Load cached tickers if not stale; else None."""
+    path = os.path.join(CACHE_DIR, cache_name)
+    if not os.path.exists(path):
+        return None
+    try:
+        mtime = os.path.getmtime(path)
+        if (time.time() - mtime) > INDEX_CACHE_SECONDS:
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
-def download_DJI_tickers():
-    req = request.Request('http://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average')
-    opener = request.urlopen(req)
-    content = opener.read().decode()
-    soup = BeautifulSoup(content, features="lxml")
-    tables = soup.find_all('table')  # the table we actually need is tables[2]
-    external_class = tables[2].findAll('a', {'class': 'external text'})
-    tickers = []
-    for ext in external_class:
-        if 'reports' not in str(ext):
-            tickers.append(ext.string)
-    return tickers
+def _save_cached_list(cache_name: str, tickers: List[str]) -> None:
+    """Save tickers to cache."""
+    path = os.path.join(CACHE_DIR, cache_name)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(tickers, f, indent=2)
+    except Exception:
+        pass
+
+
+def _fetch_html(url: str) -> Optional[str]:
+    """
+    Fetch HTML with hardened headers to avoid 403.
+    Returns decoded text or None.
+    """
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code == 200 and resp.text:
+            return resp.text
+        print(f"[INDEX] HTTP {resp.status_code} on {url}")
+        return None
+    except Exception as e:
+        print(f"[INDEX] Request failed for {url}: {e}")
+        return None
+
+
+def _parse_sp500_from_html(html: str) -> List[str]:
+    """
+    Extract S&P 500 symbols from Wikipedia HTML.
+    Strategy:
+      - Try pandas.read_html and pick the first table containing 'Symbol' column.
+      - Fallback to BeautifulSoup parsing of <table> rows.
+    """
+    # Try pandas first – resilient to minor markup changes.
+    try:
+        tables = pd.read_html(html)
+        for df in tables:
+            cols = [str(c).strip().lower() for c in df.columns]
+            if any("symbol" in c for c in cols):
+                syms = df[[c for c in df.columns if "symbol" in str(c).lower()][0]].astype(str).str.strip().tolist()
+                syms = [s.replace(".", "-") for s in syms if s and s != "nan"]
+                return syms
+    except Exception:
+        pass
+
+    # Fallback: BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+    tables = soup.find_all("table")
+    for t in tables:
+        headers = [th.get_text(strip=True).lower() for th in t.find_all("th")]
+        if any("symbol" in h for h in headers):
+            syms = []
+            for row in t.find_all("tr"):
+                cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+                if not cells:
+                    continue
+                # symbol usually in column 0 or 1
+                for c in cells[:2]:
+                    if c and len(c) <= 6 and c.isupper():
+                        syms.append(c.replace(".", "-"))
+                        break
+            return [s for s in syms if s]
+    return []
+
+
+def _parse_dji_from_html(html: str) -> List[str]:
+    """
+    Extract DJI components from Wikipedia HTML using the same approach.
+    """
+    # pandas first
+    try:
+        tables = pd.read_html(StringIO(html))
+        for df in tables:
+            cols = [str(c).strip().lower() for c in df.columns]
+            if any("symbol" in c for c in cols):
+                syms = df[[c for c in df.columns if "symbol" in str(c).lower()][0]].astype(str).str.strip().tolist()
+                syms = [s.replace(".", "-") for s in syms if s and s != "nan"]
+                return syms
+    except Exception:
+        pass
+
+    # soup fallback
+    soup = BeautifulSoup(html, "lxml")
+    tables = soup.find_all("table")
+    for t in tables:
+        headers = [th.get_text(strip=True).lower() for th in t.find_all("th")]
+        if any("symbol" in h for h in headers):
+            syms = []
+            for row in t.find_all("tr"):
+                cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+                if not cells:
+                    continue
+                for c in cells[:2]:
+                    if c and len(c) <= 6 and c.isupper():
+                        syms.append(c.replace(".", "-"))
+                        break
+            return [s for s in syms if s]
+    return []
+
+
+def download_SP500_tickers() -> List[str]:
+    """
+    Get S&P 500 constituents.
+    - Uses strong headers to avoid 403.
+    - Caches results for 24h.
+    - Returns [] on failure (never raises), so UI can degrade gracefully.
+    """
+    cache_name = "sp500.json"
+    cached = _load_cached_list(cache_name)
+    if cached:
+        return cached
+
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    html = _fetch_html(url)
+    if not html:
+        print("[INDEX] Failed to fetch S&P 500 page (403 or network issue). Returning empty list.")
+        return []
+
+    syms = _parse_sp500_from_html(html)
+    # Final clean-up: some sources use dots for class A/B shares – Yahoo prefers dashes.
+    syms = [s.replace(".", "-") for s in syms]
+    if syms:
+        _save_cached_list(cache_name, syms)
+    return syms
+
+
+def download_DJI_tickers() -> List[str]:
+    """
+    Get Dow Jones Industrial Average constituents.
+    Same approach as S&P 500 and cached for 24h.
+    """
+    cache_name = "dji.json"
+    cached = _load_cached_list(cache_name)
+    if cached:
+        return cached
+
+    url = "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"
+    html = _fetch_html(url)
+    if not html:
+        print("[INDEX] Failed to fetch DJI page (403 or network issue). Returning empty list.")
+        return []
+
+    syms = _parse_dji_from_html(html)
+    syms = [s.replace(".", "-") for s in syms]
+    if syms:
+        _save_cached_list(cache_name, syms)
+    return syms
 
 
 # ----------------------------- YAHOO HELPERS --------------------------------
@@ -311,10 +534,12 @@ def yf_download_series_xy(ticker: str, start_year: int, end_year: int) -> Option
 
 def extract_date_from_filename(filename: str, ticker: str) -> Optional[pd.Timestamp]:
     """
-    Expected filename pattern: <TICKER>_YYYY-MM-DD_<anything>.json
+    Extract the YYYY-MM-DD date from filenames like:
+      - <TICKER>_YYYY-MM-DD.json
+      - <TICKER>_YYYY-MM-DD_<anything>.json
     Returns pandas.Timestamp if found, else None.
     """
-    m = re.match(rf"^{re.escape(ticker)}_(\d{{4}}-\d{{2}}-\d{{2}})_.*\.json$", filename)
+    m = re.match(rf"^{re.escape(ticker)}_(\d{{4}}-\d{{2}}-\d{{2}})(?:_.*)?\.json$", filename)
     if not m:
         return None
     try:
@@ -360,7 +585,7 @@ def yf_get_stock_data(ticker, start_year, end_year):
         if "yf_value" in data and data["yf_value"] is not None:
             try:
                 stock_data[date_key] = float(data["yf_value"])
-                print(f"[DEBUG] Načtena hodnota YF value: {data['yf_value']} pro {date_key}")
+                print(f"[DEBUG] Loaded existing YF value: {data['yf_value']} for {date_key}")
             except Exception:
                 stock_data[date_key] = None
             continue
@@ -384,7 +609,6 @@ def yf_download_price(ticker, date, file_path, window_days: int = 3):
       - yf_value
       - yf_value_date (the trading day actually used)
     """
-    # Normalize date (tz-naive, midnight)
     date = pd.to_datetime(date)
     try:
         date = date.tz_localize(None)
@@ -392,7 +616,6 @@ def yf_download_price(ticker, date, file_path, window_days: int = 3):
         pass
     date = date.normalize()
 
-    # Download a small window around the target date (end is exclusive)
     start_w = date - pd.Timedelta(days=window_days)
     end_w   = date + pd.Timedelta(days=window_days + 1)
 
@@ -413,7 +636,6 @@ def yf_download_price(ticker, date, file_path, window_days: int = 3):
         print(f"[WARNING] No data found for {ticker} around {date.date()}")
         return None
 
-    # Robust Close extraction (handles single- and multi-index columns)
     if isinstance(hist.columns, pd.MultiIndex):
         if ('Close', ticker) in hist.columns:
             close = hist[('Close', ticker)]
@@ -429,7 +651,6 @@ def yf_download_price(ticker, date, file_path, window_days: int = 3):
         print(f"[WARNING] No close series for {ticker} around {date.date()}")
         return None
 
-    # Normalize index to tz-naive dates
     idx = pd.to_datetime(close.index)
     try:
         idx = idx.tz_localize(None)
@@ -438,16 +659,14 @@ def yf_download_price(ticker, date, file_path, window_days: int = 3):
     idx = idx.normalize()
     close.index = idx
 
-    # Find the closest trading day to `date` (no TimedeltaIndex.abs() usage)
-    td = close.index - date                        # TimedeltaIndex
-    td_ns = td.view('i8')                          # int64 nanoseconds
-    td_abs = np.abs(td_ns)                         # absolute distance
-    pos = int(np.argmin(td_abs))                   # index of min distance
+    td = close.index - date
+    td_ns = td.view('i8')
+    td_abs = np.abs(td_ns)
+    pos = int(np.argmin(td_abs))
 
     picked_date = close.index[pos]
     price = float(close.iloc[pos])
 
-    # Persist into JSON if the file exists
     if os.path.exists(file_path):
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -463,14 +682,9 @@ def yf_download_price(ticker, date, file_path, window_days: int = 3):
     return price
 
 
-
-# ----------------------------- SEC FETCH (REPORT-DATE-BASED) ----------------
+# ----------------------------- SEC FETCH ------------------------------------
 def _get_reporting_date(filing) -> Optional[pd.Timestamp]:
-    """
-    Robustly obtain the report (period-end) date from a filing object.
-    Falls back to filing_date if report date is missing.
-    """
-    # Try common attribute names for period end
+    """Try to obtain the report (period-end) date from a filing object."""
     rd = getattr(filing, "report_date", None) or getattr(filing, "period_of_report", None) \
          or getattr(filing, "period_ended", None)
     if rd is None:
@@ -484,17 +698,13 @@ def _get_reporting_date(filing) -> Optional[pd.Timestamp]:
             return None
 
 
-def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=False, yahoo_vars=None):
+def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=False, yahoo_vars=None, mapping_variables=None):
     """
     Fetch 10-Q / 10-K around a given calendar year but *store and bucket* by the report date
-    (period end). This ensures e.g. "Filed 2018-02-02, Reporting 2017-12-30" is counted under 2017.
-    We fetch two windows:
-      1) the full year [year-01-01, year-12-31]  (by filing date)
-      2) spillover window [year+1-01-01, year+1-01-31] to catch Q4 filed early next year
+    (period end).
     """
     print(f"[INFO] Zpracovávám filings pro společnost: {company.cik} ({company.ticker})")
 
-    # Obtain or create in-memory container for this CIK
     company_data = existing_data.companies.get(
         company.cik,
         CompanyIns(company.cik, company.ticker, company.title)
@@ -502,7 +712,6 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
 
     company_obj = Company(company.cik)
 
-    # Windows by FILING DATE (API filter works on filing date)
     windows = [
         (f"{year-1}-12-01", f"{year+1}-03-25"),
     ]
@@ -515,20 +724,16 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
         except Exception as e:
             print(f"[ERROR] get_filings failed for window {start_str}:{end_str}: {e}")
 
-    # Process each filing: bucket by REPORT DATE year
     for filing in all_filings:
         report_dt = _get_reporting_date(filing)
         if report_dt is None:
             print("[WARNING] Skipping filing without usable date.")
             continue
 
-        # Bucket year uses the report year
         report_year = int(report_dt.year)
         if report_year != int(year):
-            # Only keep filings that truly belong to the requested year
             continue
 
-        # Pull XBRL and construct Financials
         xbrl_data = filing.xbrl()
         if xbrl_data is None:
             print("[WARNING] Žádná XBRL data ve filing.")
@@ -540,12 +745,10 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
             print(f"[ERROR] Chyba při vytváření objektu Financials: {e}")
             continue
 
-        # Save JSON snapshot using the *report (period-end) date* in the filename
         safe_report_date = report_dt.strftime("%Y-%m-%d")
         json_dir = f"xbrl_data_json/{company.ticker}"
         duplicate_found = False
 
-        # Deduplicate on report date in the JSON directory
         if os.path.exists(json_dir):
             for existing_file in os.listdir(json_dir):
                 if existing_file.endswith(".json") and safe_report_date in existing_file:
@@ -553,7 +756,6 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
                     duplicate_found = True
                     break
         if duplicate_found:
-            # Even if JSON exists, also ensure the in-memory list has it
             if year not in company_data.years:
                 company_data.years[year] = []
             exists_in_mem = any(pd.to_datetime(f.date).normalize() == report_dt.normalize()
@@ -562,21 +764,19 @@ def SecTools_export_important_data(company, existing_data, year, fetch_yahoo=Fal
                 company_data.years[year].append(CompanyFinancials(report_dt, file_financials, location=None))
             continue
 
-        file_path = save_financials_as_json(file_financials, company.ticker, report_dt)
+        file_path = save_financials_as_json(file_financials, company.ticker, report_dt, variable_mapping=mapping_variables)
         if not file_path:
             print("[ERROR] Nepodařilo se uložit JSON.")
             continue
 
-        # Ensure the bucket exists
         if year not in company_data.years:
             company_data.years[year] = []
 
-        # Avoid duplicates in memory by report date
         exists = any(pd.to_datetime(f.date).normalize() == report_dt.normalize()
                      for f in company_data.years[year])
         if not exists:
             company_data.years[year].append(
-                CompanyFinancials(report_dt, file_financials, location=file_path)
+                CompanyFinancials(report_dt, file_financials, location=file_path, json_data=None)
             )
             print(f"[INFO] Uloženo: {company.ticker} – report {safe_report_date} "
                   f"(filed {getattr(filing, 'filing_date', 'N/A')})")
@@ -606,7 +806,7 @@ def get_overview_file(link, years, quarter):
     for current_year in years:
         response = requests.get(link, headers=HEADERS)
         if response.status_code == 200:
-            z_file = zipfile.ZipFile(io.BytesIO(response.content))
+            z_file = zipfile.ZipFile(BytesIO(response.content))
             print("Zip file downloaded")
             z_file.extractall(f"xbrl_{current_year}_Q{quarter}")
             result.append(z_file)
@@ -617,18 +817,11 @@ def get_overview_file(link, years, quarter):
     return None
 
 
-def price_earning_ratio(share_price, earnings_per_share):
-    return share_price / earnings_per_share
-
-
 # ----------------------------- INIT ----------------------------------------
-# Set user identity for EDGAR API
 set_identity("Alfred AlfredNem@gmail.com")
-
-# Keep the local list of companies fresh
 update_company_list()
 
-# Example test case
-test = CompanyIns("320193", "AAPL", "Apple Inc.")
-saved_data = CompanyData({})
+# Example:
+# test = CompanyIns("320193", "AAPL", "Apple Inc.")
+# saved_data = CompanyData({})
 # SecTools_export_important_data(test, saved_data, 2017)

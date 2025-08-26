@@ -2,6 +2,7 @@ import os
 import json
 import sys
 from datetime import datetime
+from typing import List, Optional, Dict
 
 import dash
 import pandas as pd
@@ -13,21 +14,23 @@ import info_picker_2
 from helper import human_format, extract_selected_indexes
 
 # ----------------------------- CONSTANTS -----------------------------------
-VARIABLE_SHEETS = {
-    "total assets": "balance_sheet",
-    "total liabilities": "balance_sheet",
-    "cash": "balance_sheet",
-    "Shares Outstanding": "income"
+MAPPING_VARIABLE: Dict[str, str] = {
+    "Total assets": "us-gaap_Assets",
+    "Total liabilities": "us-gaap_Liabilities",
+    "Cash": "us-gaap_CashAndCashEquivalentsAtCarryingValue",
+    "Net income": "us-gaap_NetIncomeLoss",
+    "Total shareholders’ equity": "us-gaap_StockholdersEquity",
+    "P/E": "P/E",
+    "ROE": "ROE",
 }
-VARIABLES = list(VARIABLE_SHEETS.keys())
+VARIABLES: List[str] = list(MAPPING_VARIABLE.keys())
 YEAR_RANGE = {"start": 2018, "end": datetime.now().year - 7}
 
-# Presets of indexes (keep ^SPX if you prefer; Yahoo's broad S&P symbol is ^GSPC)
 PRESET_SOURCES = {
     "sp500": {
         "label": "S&P 500",
         "loader": info_picker_2.download_SP500_tickers,
-        "shortcut": "^SPX"
+        "shortcut": "^SPX"  # or ^GSPC if you prefer
     },
     "dowjones": {
         "label": "Dow Jones Industrial Average",
@@ -39,21 +42,12 @@ PRESET_SOURCES = {
 # ----------------------------- LOAD COMPANY DATA ---------------------------
 companies = info_picker_2.CompanyData()
 companies.load_saved_companies()
-
-# TICKER -> CIK
 TICKER_TO_CIK = {v.ticker.upper(): k for k, v in companies.companies.items()}
 
 
 # ----------------------------- HELPERS -------------------------------------
 def _to_sheet(sheet_like):
-    """
-    Normalize any input into an object with `.data` being a pandas DataFrame.
-    Works for:
-      - dict (from JSON) -> DataFrame.from_dict(...)
-      - DataFrame -> as-is
-      - object with `.data` (SEC 'Statement' object) -> use .data (dict/DF/other)
-      - fallback: try DataFrame(obj), else empty DF
-    """
+    """Wrap any input so that `.data` is a DataFrame."""
     if sheet_like is None:
         df = pd.DataFrame()
     elif isinstance(sheet_like, pd.DataFrame):
@@ -80,51 +74,51 @@ def _to_sheet(sheet_like):
 
 
 def build_table_variable_options():
-    """
-    Build dropdown options for table variables.
-    Prefer keys from VARIABLE_SHEETS (guaranteed mappable),
-    but we can also include keys present in VARIABLE_ALIASES if needed.
-    """
-    # Start with variables that have a sheet mapping (safe to extract)
-    base = list(VARIABLE_SHEETS.keys())
-
-    # Optionally extend with alias keys that also have a sheet mapping
-    alias_keys = [
-        k for k in getattr(info_picker_2, "VARIABLE_ALIASES", {}).keys()
-        if k in VARIABLE_SHEETS and k not in base
-    ]
-    final = base + alias_keys
+    """Options for the summary table variable picker."""
+    final = list(MAPPING_VARIABLE.keys())
     return [{"label": v.title(), "value": v} for v in final]
 
 
-# ----------------------------- FUNCTIONS -----------------------------------
+def _read_json(filepath: str) -> Optional[dict]:
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[ERROR] Failed to read JSON {filepath}: {e}")
+        return None
+
+
+def extract_from_base_or_computed(json_dict: dict, human_variable: str) -> Optional[float]:
+    """
+    Read a variable from JSON 'base'/'computed'. For mapped variables we read base[us-gaap_*].
+    """
+    if not isinstance(json_dict, dict):
+        return None
+    base = json_dict.get("base", {}) or {}
+    computed = json_dict.get("computed", {}) or {}
+
+    code = MAPPING_VARIABLE.get(human_variable)
+    if code and code in base:
+        try: return float(base[code])
+        except Exception: return None
+
+    if human_variable in computed:
+        try: return float(computed[human_variable])
+        except Exception: return None
+
+    return None
+
+
+# ----------------------------- SUMMARY TABLE --------------------------------
 def load_summary_table(selected_variables=None):
-    """
-    Build a summary DataFrame from saved JSON filings.
-
-    Parameters
-    ----------
-    selected_variables : list[str] | None
-        List of variable names to extract. If None or empty, falls back to the
-        default global VARIABLES. Variables that do not exist in VARIABLE_SHEETS
-        are silently skipped.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with columns: ['CIK', 'Ticker', 'Company', 'Date'] + selected variables.
-    """
-    # 1) Resolve which variables to use (fallback to default)
     if not selected_variables:
         vars_to_use = list(VARIABLES)
     else:
-        # Keep only variables that have a mapping in VARIABLE_SHEETS
-        vars_to_use = [v for v in selected_variables if v in VARIABLE_SHEETS]
+        vars_to_use = [v for v in selected_variables if v in MAPPING_VARIABLE]
         if not vars_to_use:
             vars_to_use = list(VARIABLES)
 
     records = []
-
     for cik, company in companies.companies.items():
         ticker, name = company.ticker, company.title
         json_dir = f"xbrl_data_json/{ticker}"
@@ -135,73 +129,32 @@ def load_summary_table(selected_variables=None):
             if not file.endswith(".json"):
                 continue
             filepath = os.path.join(json_dir, file)
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+            data = _read_json(filepath)
+            if not data:
+                continue
+            report_date = pd.to_datetime(data.get("date", None))
+            if not report_date:
+                continue
 
-                report_date = pd.to_datetime(data.get("date", None))
-                if not report_date:
-                    continue
-
-                row = {
-                    "CIK": cik,
-                    "Ticker": ticker,
-                    "Company": name,
-                    "Date": report_date.strftime("%Y-%m-%d"),
-                }
-
-                # 2) Extract only the requested variables
-                for var in vars_to_use:
-                    sheet_key = VARIABLE_SHEETS.get(var)
-                    if not sheet_key:
-                        continue
-
-                    sheet_data = data.get(sheet_key, {})
-                    df = pd.DataFrame.from_dict(sheet_data)
-                    value = None
-
-                    if not df.empty:
-                        # a) exact match using aliases
-                        for alias in info_picker_2.VARIABLE_ALIASES.get(var.lower(), [var.lower()]):
-                            for row_label in df.index:
-                                if row_label.strip().lower() == alias:
-                                    value = df.loc[row_label].dropna().iloc[0]
-                                    break
-                            if value is not None:
-                                break
-
-                        # b) partial match as fallback
-                        if value is None:
-                            for alias in info_picker_2.VARIABLE_ALIASES.get(var.lower(), [var.lower()]):
-                                for row_label in df.index:
-                                    if alias in row_label.strip().lower():
-                                        value = df.loc[row_label].dropna().iloc[0]
-                                        break
-                                if value is not None:
-                                    break
-
-                    # Cast to int if possible to improve filtering in Dash DataTable
-                    try:
-                        row[var] = int(value)
-                    except (ValueError, TypeError):
-                        row[var] = value
-
-                records.append(row)
-
-            except Exception as e:
-                print(f"[ERROR] {filepath} – {e}")
+            row = {"CIK": cik, "Ticker": ticker, "Company": name, "Date": report_date.strftime("%Y-%m-%d")}
+            for var in vars_to_use:
+                val = extract_from_base_or_computed(data, var)
+                try:
+                    row[var] = int(val) if val is not None and float(val).is_integer() else val
+                except Exception:
+                    row[var] = val
+            records.append(row)
 
     columns = ["CIK", "Ticker", "Company", "Date"] + vars_to_use
     df = pd.DataFrame(records, columns=columns)
-
-    if df.empty:
-        print("[WARNING] Žádné záznamy nebyly načteny.")
-        return df
-
-    df.sort_values(["Company", "Date"], inplace=True)
+    if not df.empty:
+        df.sort_values(["Company", "Date"], inplace=True)
+    else:
+        print("[WARNING] No records loaded for summary.")
     return df
 
 
+# ----------------------------- GRAPH GENERATION -----------------------------
 def generate_graph(selected_ciks, selected_variables, selected_indexes, start_year, end_year, use_yahoo):
     fig = go.Figure()
 
@@ -211,161 +164,139 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
         return fig
 
     if not selected_variables:
-        selected_variables = ["total assets"]
-        print("[INFO] Výchozí proměnná: total assets")
+        selected_variables = ["Total assets"]
+        print("[INFO] Default variable: Total assets")
 
     current_year = datetime.now().year
     start_year, end_year = min(start_year, end_year), max(start_year, end_year)
     if start_year > current_year or end_year > current_year:
-        print(f"[ERROR] Rok mimo rozsah. Aktuální rok: {current_year}")
+        print(f"[ERROR] Year out of range. Current year: {current_year}")
         return fig
 
-    # ---------------- Filing traces (companies) ----------------
+    # --- company filings (primary axis) ---
     for cik in (selected_ciks or []):
         company = companies.companies.get(cik)
         if not company:
             continue
-        print(f"[DEBUG] Zpracovávám: {company.ticker} ({company.title})")
 
-        loaded_years = set()
         json_dir = f"xbrl_data_json/{company.ticker}"
-
-        # Load cached JSONs if present
+        filings_loaded = []
         if os.path.exists(json_dir):
             for file in os.listdir(json_dir):
                 if file.endswith(".json") and company.ticker in file:
                     filepath = os.path.join(json_dir, file)
-                    try:
-                        with open(filepath, 'r', encoding='utf-8') as f:
-                            json_data = json.load(f)
-                        date = pd.to_datetime(json_data["date"]).normalize()
-                        year = date.year
-                        if not (start_year <= year <= end_year):
-                            continue
-
-                        # Wrap JSON dicts into .data DataFrames
-                        financials = type("Financials", (object,), {
-                            "balance_sheet": _to_sheet(json_data.get("balance_sheet", {})),
-                            "income": _to_sheet(json_data.get("income", {})),
-                            "cashflow": _to_sheet(json_data.get("cashflow", {}))
-                        })()
-
-                        if year not in company.years:
-                            company.years[year] = []
-                        if not any(f.date == date for f in company.years[year]):
-                            company.years[year].append(
-                                info_picker_2.CompanyFinancials(date, financials, location=filepath)
-                            )
-                        loaded_years.add(year)
-                    except Exception as e:
-                        print(f"[ERROR] Chyba při načítání {file}: {e}")
-
-        # Fetch (or top-up) filings from SEC so each year has up to 4 filings
-        for year in range(start_year, end_year + 1):
-            current_count = len(company.years.get(year, []))
-            if current_count < 4:
-                print(f"[DEBUG] Year {year}: have {current_count} filings, fetching from SEC...")
-                updated_company = info_picker_2.SecTools_export_important_data(company, companies, year)
-                if updated_company:
-                    company.years.update(updated_company.years)
-                new_count = len(company.years.get(year, []))
-                print(f"[DEBUG] Year {year}: now have {new_count} filings after fetch.")
-
-        # Build traces per variable
-        for variable in selected_variables:
-            x_values, y_values = [], []
-            for year, filings in company.years.items():
-                if not (start_year <= year <= end_year):
-                    continue
-                for filing in filings:
-                    if not (filing.date and filing.financials):
+                    data = _read_json(filepath)
+                    if not data:
                         continue
+                    dt = pd.to_datetime(data.get("date")).normalize()
+                    if start_year <= dt.year <= end_year:
+                        filings_loaded.append((dt, data))
 
-                    filing_dt = pd.to_datetime(filing.date).normalize()
-                    financials_obj = filing.financials
+        # ensure SEC fetch if too few filings per year (optional, keeps your original behavior)
+        for year in range(start_year, end_year + 1):
+            # skip if we already have >=4 items that year
+            if sum(1 for d, _ in filings_loaded if d.year == year) < 4:
+                updated_company = info_picker_2.SecTools_export_important_data(
+                    company, companies, year, mapping_variables=MAPPING_VARIABLE
+                )
+                if updated_company:
+                    # load any new jsons added by the fetch
+                    if os.path.exists(json_dir):
+                        for file in os.listdir(json_dir):
+                            if file.endswith(".json") and company.ticker in file:
+                                filepath = os.path.join(json_dir, file)
+                                data = _read_json(filepath)
+                                if not data:
+                                    continue
+                                dt = pd.to_datetime(data.get("date")).normalize()
+                                if start_year <= dt.year <= end_year and (dt, data) not in filings_loaded:
+                                    filings_loaded.append((dt, data))
+
+        for human_var in selected_variables:
+            xs, ys, customdata = [], [], []
+
+            # us-gaap code (for base lookup)
+            code = MAPPING_VARIABLE.get(human_var, human_var)
+
+            for filing_dt, json_data in filings_loaded:
+                try:
+                    value = info_picker_2.get_file_variable(code, json_data, year=filing_dt.year)
+                except Exception as e:
+                    print(f"[ERROR] get_file_variable({code}) failed for {company.ticker}: {e}")
                     value = None
 
-                    for sheet_name in ["balance_sheet", "income", "cashflow"]:
-                        try:
-                            # JSON path: attributes 'balance_sheet'/'income'/'cashflow' already wrapped
-                            if hasattr(financials_obj, sheet_name):
-                                sheet = _to_sheet(getattr(financials_obj, sheet_name))
-                            # Live SEC path: get_* methods return 'Statement' object with .data
-                            elif hasattr(financials_obj, f"get_{sheet_name}"):
-                                raw = getattr(financials_obj, f"get_{sheet_name}")()
-                                sheet = _to_sheet(raw)
-                            else:
-                                continue
+                y_num = None
+                try:
+                    y_num = float(value) if value is not None else None
+                except Exception:
+                    pass
 
-                            value = info_picker_2.get_file_variable(variable, sheet, year)
-                            if value is not None:
-                                break
-                        except Exception as e:
-                            print(f"[ERROR] Chyba při čtení {sheet_name} pro {company.ticker}: {e}")
-                            continue
+                xs.append(filing_dt)
+                ys.append(y_num)
 
-                    try:
-                        y_num = float(value) if value is not None else None
-                    except ValueError:
-                        y_num = None
+                row = [human_format(y_num) if y_num is not None else None]
+                customdata.append(row)
 
-                    x_values.append(filing_dt)
-                    y_values.append(y_num)
-
-            combined = [(d, v) for d, v in zip(x_values, y_values) if v is not None]
+            # sort & filter out None
+            combined = [(d, v, cd) for d, v, cd in zip(xs, ys, customdata) if v is not None]
             combined.sort(key=lambda x: x[0])
-            if combined:
-                x_sorted, y_sorted = zip(*combined)
-
-                # Tooltip with human_format + optional Yahoo price
-                custom_template = (
-                    f"{company.title} - {variable}<br>"
-                    "Datum: %{x|%Y-%m-%d}<br>"
-                    "Hodnota: %{customdata[0]} $<br>"
-                )
-                customdata = [[human_format(v)] for v in y_sorted]
-
-                if use_yahoo:
-                    yahoo_map = info_picker_2.yf_get_stock_data(company.ticker, start_year, end_year) or {}
-                    yahoo_dict = {pd.to_datetime(d).date(): v for d, v in yahoo_map.items() if v is not None}
-                    yahoo_vals = [yahoo_dict.get(d.date(), None) for d in x_sorted]
-                    if any(v is not None for v in yahoo_vals):
-                        for row, yf in zip(customdata, yahoo_vals):
-                            row.append(None if yf is None else float(yf))
-                        custom_template += "Yahoo akcie: %{customdata[1]:.2f} $<br>"
-
-                custom_template += "<extra></extra>"
-
-                fig.add_trace(go.Scatter(
-                    x=list(x_sorted),
-                    y=[float(v) for v in y_sorted],
-                    mode='lines+markers',
-                    name=f"{company.title} - {variable}",
-                    customdata=customdata,
-                    hovertemplate=custom_template
-                ))
-
-    # --- Yahoo index traces on secondary axis ---
-    if selected_indexes:
-        for selected_index in selected_indexes:
-            # Function returns tz-naive, normalized dates already
-            xy = info_picker_2.yf_download_series_xy(selected_index, start_year, end_year)
-            if not xy:
-                print(f"[WARNING] Index series empty for {selected_index}")
+            if not combined:
                 continue
+            x_sorted, y_sorted, cd_sorted = zip(*combined)
 
+            tooltip = (
+                f"{company.title} - {human_var}<br>"
+                "Date: %{x|%Y-%m-%d}<br>"
+                "Value: %{customdata[0]}<br>"
+            )
+
+            # Attach Yahoo price per filing date if requested
+            if use_yahoo:
+                yf_map = info_picker_2.yf_get_stock_data(company.ticker, start_year, end_year) or {}
+                yf_by_date = {pd.to_datetime(d).date(): v for d, v in yf_map.items() if v is not None}
+                # extend customdata with yf price
+                new_cd = []
+                has_any = False
+                for d, row in zip(x_sorted, cd_sorted):
+                    v = yf_by_date.get(d.date())
+                    row = list(row)
+                    row.append(v if v is not None else None)
+                    if v is not None:
+                        has_any = True
+                    new_cd.append(row)
+                cd_sorted = tuple(new_cd)
+                if has_any:
+                    tooltip += "Yahoo close: %{customdata[1]:.2f} $<br>"
+
+            tooltip += "<extra></extra>"
+
+            fig.add_trace(go.Scatter(
+                x=list(x_sorted),
+                y=[float(v) for v in y_sorted],
+                mode='lines+markers',
+                name=f"{company.title} - {human_var}",
+                customdata=list(cd_sorted),
+                hovertemplate=tooltip
+            ))
+
+    # --- Yahoo index overlay (secondary axis) ---
+    if selected_indexes:
+        for idx in selected_indexes:
+            xy = info_picker_2.yf_download_series_xy(idx, start_year, end_year)
+            if not xy:
+                print(f"[WARNING] Index series empty for {idx}")
+                continue
             x_vals, y_vals = xy
             fig.add_trace(go.Scatter(
                 x=list(x_vals),
                 y=[float(v) for v in y_vals],
                 mode="lines",
-                name=f"{selected_index} (Yahoo)",
+                name=f"{idx} (Yahoo)",
                 line=dict(dash="dash", width=3),
                 yaxis="y2",
-                hovertemplate="Index %{fullData.name}<br>Datum: %{x|%Y-%m-%d}<br>Close: %{y:.2f} $<extra></extra>"
+                hovertemplate="Index %{fullData.name}<br>Date: %{x|%Y-%m-%d}<br>Close: %{y:.2f} $<extra></extra>"
             ))
 
-    # Axes + legend (legend pushed right so it won't collide with y2 label)
     fig.update_layout(
         title="Vývoj vybraných proměnných",
         xaxis_title="Datum filingů",
@@ -380,23 +311,15 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
             type="linear",
             showgrid=False
         ),
-        legend=dict(
-            x=1.10,  # move legend a bit to the right of the plotting area
-            y=1,
-            xanchor="left",
-            yanchor="top",
-            bgcolor="rgba(0,0,0,0)"
-        )
+        legend=dict(x=1.10, y=1, xanchor="left", yanchor="top", bgcolor="rgba(0,0,0,0)")
     )
     fig.update_xaxes(type="date", tickformat="%Y-%m-%d")
-
     return fig
 
 
 def filter_summary_table(n_clicks, filter_value):
     if not filter_value or filter_value.strip() == "":
         return summary_df.to_dict("records")
-
     try:
         filtered_df = summary_df.query(filter_value)
         return filtered_df.to_dict("records")
@@ -405,31 +328,22 @@ def filter_summary_table(n_clicks, filter_value):
         return summary_df.to_dict("records")
 
 
-# --------- Helpers: options with indexes -------------
+# --------- Dropdown options incl. index shortcuts --------------------------
 def build_company_dropdown_options():
     options = []
     options.append({"label": "— Indexes —", "value": "__SEP__IDX__", "disabled": True})
-
     for key, meta in PRESET_SOURCES.items():
-        options.append({
-            "label": meta["label"],
-            "value": meta["shortcut"]
-        })
-
+        options.append({"label": meta["label"], "value": meta["shortcut"]})
     options.append({"label": "— All companies —", "value": "__SEP__ALL__", "disabled": True})
-
     for cik, comp in companies.companies.items():
-        options.append({
-            "label": f"{comp.title} [{comp.ticker}] ({cik})",
-            "value": cik
-        })
+        options.append({"label": f"{comp.title} [{comp.ticker}] ({cik})", "value": cik})
     return options
 
 
 def expand_selected_values(values):
     """
-    Expand index values (e.g., ^SPX, ^DJI) into constituent CIKs;
-    keep directly-selected CIKs as-is.
+    Expand index values (e.g., ^SPX, ^DJI) into constituent CIKs; keep direct CIKs as-is.
+    IMPORTANT: If loader fails (e.g., HTTP 403), we return no expansion rather than raising.
     """
     if not values:
         return []
@@ -439,10 +353,12 @@ def expand_selected_values(values):
             preset = next((m for m in PRESET_SOURCES.values() if m.get("shortcut") == val), None)
             if not preset:
                 continue
+            tickers = []
             try:
                 tickers = preset["loader"]() or []
             except Exception as e:
-                print(f"[ERROR] loader preset for {val}: {e}")
+                # Never break the whole flow if Wikipedia blocks scraping
+                print(f"[ERROR] loader preset for {val}: {e} (continuing without expansion)")
                 tickers = []
             for t in tickers:
                 cik = TICKER_TO_CIK.get(str(t).upper())
@@ -453,7 +369,7 @@ def expand_selected_values(values):
     return list(expanded)
 
 
-# ----------------------------- APP & CALLBACK ------------------------------
+# ----------------------------- APP & CALLBACKS ------------------------------
 app = dash.Dash(__name__)
 
 app.index_string = '''
@@ -501,13 +417,12 @@ app.index_string = '''
 </html>
 '''
 
-# Initial table (default variables)
+# Initial table
 summary_df = load_summary_table()
 summary_columns = [{"name": col, "id": col} for col in summary_df.columns]
 summary_data = summary_df.to_dict("records")
 
 @app.callback(
-    # NOTE: we removed summary-table from outputs to avoid multiple-callback conflict
     [Output('filing-graph', 'figure'),
      Output('error-message', 'children')],
     Input('draw-button', 'n_clicks'),
@@ -526,30 +441,23 @@ def unified_callback(draw_clicks,
     triggered = callback_context.triggered[0]["prop_id"].split(".")[0]
 
     if triggered == "draw-button":
-        # Normalize inputs
         values = selected_values or []
         if not isinstance(values, list):
             values = [values]
         selected_variables = selected_variables or []
 
-        # Basic year validation
         if not (isinstance(start_year, int) and isinstance(end_year, int)):
             return no_update, "Zadejte platné roky (např. 2018 až 2022)."
         if start_year > end_year:
             return no_update, "Počáteční rok musí být menší nebo roven koncovému roku."
 
-        # Extract indexes (^SPX, ^DJI, …) and expand to CIKs for filings
         selected_indexes = extract_selected_indexes(values)
         selected_ciks = expand_selected_values(values)
 
         if not selected_ciks and not selected_indexes:
             return no_update, "Vyberte alespoň jednu společnost nebo index."
 
-        use_yahoo = bool(
-            yahoo_state and (
-                (isinstance(yahoo_state, list) and len(yahoo_state) > 0) or yahoo_state is True
-            )
-        )
+        use_yahoo = bool(yahoo_state and ((isinstance(yahoo_state, list) and len(yahoo_state) > 0) or yahoo_state is True))
 
         fig = generate_graph(
             selected_ciks=selected_ciks,
@@ -597,7 +505,7 @@ app.layout = (
                         html.Label("Vyberte proměnné (graf):", style={"fontWeight": "bold", "color": "white"}),
                         dcc.Dropdown(
                             id='variable-dropdown',
-                            options=[{'label': k.title(), 'value': k} for k in info_picker_2.VARIABLE_ALIASES.keys()],
+                            options=[{'label': k.title(), 'value': k} for k in MAPPING_VARIABLE.keys()],
                             multi=True,
                             placeholder="Vyberte jednu nebo více proměnných"
                         ),
@@ -650,9 +558,8 @@ app.layout = (
                             "plot_bgcolor": "#000000"
                         })
                     ),
-                    html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "#FFFFFF"}),
+                    html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "white"}),
 
-                    # --- Table controls ---
                     html.Div([
                         html.Label("Vyberte proměnné (tabulka):", style={"fontWeight": "bold", "color": "white"}),
                         dcc.Dropdown(
@@ -663,7 +570,6 @@ app.layout = (
                         ),
                     ], style={'marginBottom': '10px'}),
 
-                    # New button to apply selection to the table
                     html.Button(
                         "Aktualizuj tabulku",
                         id='update-table-button',
@@ -713,19 +619,11 @@ app.layout = (
     State('table-variables-dropdown', 'value')
 )
 def update_summary_table(n_clicks, selected_vars):
-    """
-    When the user clicks the button, rebuild the summary table for the selected variables.
-    - If nothing is selected, fall back to the default VARIABLES.
-    - Recompute via load_summary_table(selected_vars) to ensure columns exist.
-    """
-    # Normalize selection (allow empty -> default)
     if not selected_vars:
         selected_vars = list(VARIABLES)
 
-    # Build a fresh DF with exactly those variables
     df = load_summary_table(selected_vars)
 
-    # Columns config: keep base columns as-is; title-case for variable columns
     base_cols = ["CIK", "Ticker", "Company", "Date"]
     columns = []
     for col in df.columns:
@@ -743,4 +641,3 @@ if __name__ == '__main__':
     if "WindowsApps" in sys.executable:
         raise RuntimeError("Debugger používá python.exe z WindowsApps – nepodporováno.")
     app.run(debug=True, use_reloader=False)
-
