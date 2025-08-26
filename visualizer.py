@@ -3,6 +3,7 @@ import json
 import sys
 from datetime import datetime
 from typing import List, Optional, Dict
+import dash_bootstrap_components as dbc
 
 import dash
 import pandas as pd
@@ -443,7 +444,10 @@ def expand_selected_values(values):
 
 
 # ----------------------------- APP & CALLBACKS ------------------------------
-app = dash.Dash(__name__)
+app = dash.Dash(
+    __name__,
+    external_stylesheets=[dbc.themes.LUX]
+)
 
 app.index_string = '''
 <!DOCTYPE html>
