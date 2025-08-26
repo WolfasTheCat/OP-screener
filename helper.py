@@ -53,6 +53,9 @@ def first_numeric(variables: Dict[str, Any], keys: list[str]) -> Optional[float]
                 return v
     return None
 
+def to_percent(r: Optional[float]) -> Optional[float]:
+    return None if r is None else r * 100
+
 def extract_selected_indexes(values):
     """Return a list of Yahoo shortcuts (e.g., ^GSPC, ^DJI) from the dropdown selection."""
     if not values:

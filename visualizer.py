@@ -29,7 +29,10 @@ MAPPING_VARIABLE: Dict[str, str] = {
 RATIO_VARIABLES: List[str] = [
     "ROE",
     "P/E",
-    "P/FCF"
+    "P/FCF",
+    "P/CF",
+    "D/E",
+    "Pretax Profit Margin"
 ]
 
 # Special variables (neither GAAP nor ratio) read directly from JSON
