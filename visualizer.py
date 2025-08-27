@@ -360,7 +360,14 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
         xaxis_title="Datum filingů",
         yaxis_title="Hodnota (filings)",
         template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
         hovermode="x unified",
+        hoverlabel=dict(
+            bgcolor="black",  # solid white background
+            font_size=14,  # adjust to taste
+            font_color="white"  # full color text
+        ),
         yaxis=dict(type="log"),
         yaxis2=dict(
             title="Index (Yahoo)",
@@ -369,8 +376,9 @@ def generate_graph(selected_ciks, selected_variables, selected_indexes, start_ye
             type="linear",
             showgrid=False
         ),
-        legend=dict(x=1.10, y=1, xanchor="left", yanchor="top", bgcolor="rgba(0,0,0,0)")
+        legend=dict(x=1.10, y=1, xanchor="left", yanchor="top")
     )
+
     fig.update_xaxes(type="date", tickformat="%Y-%m-%d")
     return fig
 
@@ -446,53 +454,8 @@ def expand_selected_values(values):
 # ----------------------------- APP & CALLBACKS ------------------------------
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.LUX]
+    external_stylesheets=[dbc.themes.CYBORG]
 )
-
-app.index_string = '''
-<!DOCTYPE html>
-<html>
-    <head>
-        {%metas%}
-        <title>Filing Visualizer</title>
-        {%favicon%}
-        {%css%}
-        <style>
-            body, html {
-                margin: 0;
-                padding: 0;
-                background-color: #1a1a1a;
-                font-family: sans-serif;
-                overflow-x: hidden;
-            }
-            .custom-loader.dash-loading > .dash-loading-overlay{
-                position: fixed;
-                inset: 0;
-                background: rgba(15,17,21,0.45) !important;
-                backdrop-filter: blur(2px);
-                z-index: 9999;
-                display: flex;
-                align-items: center;
-                justify-content: center.
-            }
-            .custom-loader .dash-spinner{
-                width: 64px;
-                height: 64px;
-                border-width: 6px;
-                filter: drop-shadow(0 0 10px rgba(45,140,255,0.55));
-            }
-        </style>
-    </head>
-    <body>
-        {%app_entry%}
-        <footer>
-            {%config%}
-            {%scripts%}
-            {%renderer%}
-        </footer>
-    </body>
-</html>
-'''
 
 # Initial table
 summary_df = load_summary_table()
@@ -508,13 +471,12 @@ summary_data = summary_df.to_dict("records")
      State('year-start-input', 'value'),
      State('year-end-input', 'value'),
      State('filing-graph', 'figure'),
-     State('finnhub-checkbox', 'value'),
      State('yahoo-checkbox', 'value')]
 )
 def unified_callback(draw_clicks,
                      selected_values, selected_variables,
                      start_year, end_year, current_fig,
-                     finnhub_value, yahoo_state):
+                      yahoo_state):
     triggered = callback_context.triggered[0]["prop_id"].split(".")[0]
 
     if triggered == "draw-button":
@@ -565,45 +527,39 @@ app.layout = (
             children=[
                 html.H1("Interaktivní vizualizace filingů", style={
                     "textAlign": "center",
-                    "color": "#FFFFFF",
                     "marginBottom": "30px"
                 }),
 
                 html.Div([
                     html.Div([
-                        html.Label("Vyberte společnost / index:", style={"fontWeight": "bold", "color": "white"}),
+                        html.H6("Vyberte společnost / index:"),
                         dcc.Dropdown(
                             id='company-dropdown',
                             options=build_company_dropdown_options(),
                             multi=True,
-                            placeholder="Vyberte jednu či více společností nebo index"
+                            placeholder="Vyberte jednu či více společností nebo index",
+                            style={"color": "black"}
                         ),
                     ], style={'marginBottom': '20px'}),
 
                     html.Div([
-                        html.Label("Vyberte proměnné (graf):", style={"fontWeight": "bold", "color": "white"}),
+                        html.H6("Vyberte proměnné (graf):"),
                         dcc.Dropdown(
                             id='variable-dropdown',
                             options=build_variable_dropdown_options(),
                             multi=True,
-                            placeholder="Vyberte jednu nebo více proměnných"
+                            placeholder="Vyberte jednu nebo více proměnných",
+                            style={"color": "black"}
                         ),
                     ], style={'marginBottom': '20px'}),
 
                     html.Div([
-                        html.Label("Rozsah let:", style={"fontWeight": "bold", "color": "white"}),
+                        html.H6("Rozsah let:" ),
                         html.Div([
                             dcc.Input(id='year-start-input', type='number', step=1, value=YEAR_RANGE["start"],
                                       placeholder="Od roku", style={'marginRight': '20px', 'width': '100px'}),
                             dcc.Input(id='year-end-input', type='number', step=1, value=YEAR_RANGE["end"],
                                       placeholder="Do roku", style={'marginRight': '20px', 'width': '100px'}),
-                            dcc.Checklist(
-                                id='finnhub-checkbox',
-                                options=[{'label': 'Zahrnout data z Finnhub', 'value': 'finnhub'}],
-                                value=[],
-                                inputStyle={"marginRight": "5px"},
-                                style={"color": "white"}
-                            ),
                             dcc.Checklist(
                                 id='yahoo-checkbox',
                                 options=[{'label': 'Zahrnout data z Yahoo', 'value': 'yahoo'}],
@@ -640,12 +596,13 @@ app.layout = (
                     html.H3("Tabulka ukazatelů", style={"marginTop": "40px", "color": "white"}),
 
                     html.Div([
-                        html.Label("Vyberte proměnné (tabulka):", style={"fontWeight": "bold", "color": "white"}),
+                        html.H6("Vyberte proměnné (tabulka):"),
                         dcc.Dropdown(
                             id='table-variables-dropdown',
                             options=build_table_variable_options(),
                             multi=True,
-                            placeholder="Vyberte jednu či více proměnných pro tabulku"
+                            placeholder="Vyberte jednu či více proměnných pro tabulku",
+                            style={"color": "black"}
                         ),
                     ], style={'marginBottom': '10px'}),
 
@@ -657,10 +614,10 @@ app.layout = (
                             "backgroundColor": "#2D8CFF",
                             "color": "white",
                             "border": "none",
-                            "padding": "8px 16px",
+                            "padding": "10px 20px",
                             "borderRadius": "5px",
                             "cursor": "pointer",
-                            "marginBottom": "16px"
+                            "marginBottom": "20px"
                         }
                     ),
 
@@ -673,15 +630,12 @@ app.layout = (
                         filter_action='native',
                         sort_mode="multi",
                         page_action='none',
-                        style_table={
-                            'maxHeight': '500px',
-                            'overflowY': 'auto',
-                            'overflowX': 'auto',
-                            'border': '1px solid #444'
-                        },
-                        style_cell={'textAlign': 'left', 'padding': '5px'},
-                        style_header={'backgroundColor': 'rgb(30, 30, 30)', 'color': 'white'},
-                        style_data={'backgroundColor': 'rgb(50, 50, 50)', 'color': 'white'},
+                        style_table={'maxHeight': '500px', 'overflowY': 'auto', 'overflowX': 'auto',
+                                     'border': '1px solid #444'},
+                        style_cell={'textAlign': 'left', 'padding': '6px', 'backgroundColor': '#222',
+                                    'color': '#e9ecef', 'border': '1px solid #444'},
+                        style_header={'backgroundColor': '#2a2a2a', 'color': '#e9ecef', 'fontWeight': 'bold',
+                                      'border': '1px solid #444'},
                     )
                 ], style={'maxWidth': '1200px', 'margin': '40px auto'})
             ]
